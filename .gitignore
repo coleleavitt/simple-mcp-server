@@ -5,3 +5,4 @@ Cargo.lock
 **/*.rs.bk
 *.pdb
 rust-project.json
+.claude/
