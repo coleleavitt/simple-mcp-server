@@ -1,7 +1,7 @@
 use crate::error::MCPError;
 use crate::request::MCPRequest;
 use crate::response::MCPResponse;
-use crate::notifications::{ServerNotification, ProgressSender}; // ← NEW IMPORT
+use crate::notifications::{ServerNotification, ProgressSender};
 use crate::tools::{
     InitializeResponse, Prompt, PromptResponse, Resource, ResourceContent,
     ServerCapabilities, ServerInfo, StreamChunk, Tool, ToolResponse
