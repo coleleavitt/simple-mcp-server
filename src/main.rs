@@ -237,19 +237,17 @@ impl MyToolHandler {
 
     async fn handle_get_system_info(
         &self,
-        args: &Value,
+        _args: &Value,
         progress_sender: ProgressSender,
     ) -> Result<ToolResponse, MCPError> {
-        let _ = args; // No parameters needed
         self.get_system_info(progress_sender).await
     }
 
     async fn handle_long_running_task(
         &self,
-        args: &Value,
+        _args: &Value,
         progress_sender: ProgressSender,
     ) -> Result<ToolResponse, MCPError> {
-        let _ = args; // No parameters needed
         self.long_running_task(progress_sender).await
     }
 
