@@ -273,7 +273,7 @@ impl<H: ToolHandler> SystemMCPServer<H> {
         }
 
         // Create progress sender for this request
-        let progress_sender = ProgressSender::new(self.notification_tx.clone()); // ← UPDATED
+        let progress_sender = ProgressSender::new(self.notification_tx.clone());
 
         // Execute with cancellation support
         let result = tokio::select! {
