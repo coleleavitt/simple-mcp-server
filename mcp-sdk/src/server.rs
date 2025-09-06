@@ -1,19 +1,23 @@
-use async_trait::async_trait;
-use tokio_stream::Stream;
 use crate::error::MCPError;
 use crate::request::MCPRequest;
 use crate::response::MCPResponse;
+use crate::notifications::{ServerNotification, ProgressSender};
 use crate::tools::{
-    InitializeResponse, ServerCapabilities, ServerInfo, Tool, ToolResponse,
-    Prompt, PromptResponse, Resource, ResourceContent, StreamChunk
+    InitializeResponse, Prompt, PromptResponse, Resource, ResourceContent,
+    ServerCapabilities, ServerInfo, StreamChunk, Tool, ToolResponse
 };
+use async_trait::async_trait;
 use serde_json::Value;
+use std::collections::HashMap;
 use std::pin::Pin;
+use std::sync::Arc;
+use tokio::sync::{mpsc, RwLock};
+use tokio_stream::Stream;
 
 #[async_trait]
 pub trait ToolHandler: Send + Sync {
     // Tool methods
-    async fn call_tool(&self, name: &str, args: &Value) -> Result<ToolResponse, MCPError>;
+    async fn call_tool(&self, name: &str, args: &Value, progress_sender: ProgressSender) -> Result<ToolResponse, MCPError>;
 
     // Prompt methods
     async fn list_prompts(&self) -> Result<Vec<Prompt>, MCPError> {
@@ -47,6 +51,11 @@ pub trait ToolHandler: Send + Sync {
 
     async fn on_tool_completed(&self, name: &str, success: bool) {
         let _ = (name, success);
+    }
+
+    // Cancellation hook
+    async fn on_request_cancelled(&self, request_id: &str, reason: Option<&str>) {
+        eprintln!("[CANCEL] Request {} cancelled: {:?}", request_id, reason);
     }
 }
 
@@ -102,9 +111,13 @@ impl ServerBuilder {
     }
 
     pub fn build<H: ToolHandler>(self, handler: H) -> SystemMCPServer<H> {
+        let (notification_tx, notification_rx) = mpsc::unbounded_channel();
         SystemMCPServer {
             handler,
             capabilities: self.capabilities,
+            active_requests: Arc::new(RwLock::new(HashMap::new())),
+            notification_tx,
+            notification_rx: Some(notification_rx),
         }
     }
 }
@@ -112,11 +125,20 @@ impl ServerBuilder {
 pub struct SystemMCPServer<H: ToolHandler> {
     handler: H,
     capabilities: ServerCapabilities,
+    // Track in-progress requests for cancellation
+    active_requests: Arc<RwLock<HashMap<String, tokio::sync::oneshot::Sender<()>>>>,
+    // Notification channel for progress updates
+    notification_tx: mpsc::UnboundedSender<ServerNotification>,
+    notification_rx: Option<mpsc::UnboundedReceiver<ServerNotification>>,
 }
 
 impl<H: ToolHandler> SystemMCPServer<H> {
     pub fn builder() -> ServerBuilder {
         ServerBuilder::new()
+    }
+
+    pub fn take_notification_receiver(&mut self) -> Option<mpsc::UnboundedReceiver<ServerNotification>> {
+        self.notification_rx.take()
     }
 
     fn detect_version(&self, req: &MCPRequest) -> JsonRpcVersion {
@@ -142,8 +164,19 @@ impl<H: ToolHandler> SystemMCPServer<H> {
     pub async fn handle(&self, req: MCPRequest) -> Option<MCPResponse> {
         let version = self.detect_version(&req);
 
+        // Handle notifications (no response)
         if req.id.is_none() {
-            return None;
+            return match req.method.as_str() {
+                "notifications/cancelled" => {
+                    self.handle_cancellation(&req).await;
+                    None
+                }
+                "notifications/ping" => {
+                    eprintln!("[PING] Received ping from client");
+                    None
+                }
+                _ => None,
+            }
         }
 
         let result: Result<Value, MCPError> = match req.method.as_str() {
@@ -153,20 +186,16 @@ impl<H: ToolHandler> SystemMCPServer<H> {
                     capabilities: self.capabilities.clone(),
                     server_info: ServerInfo {
                         name: "secure-system-mcp".into(),
-                        version: "0.3.0".into(), // Updated version
+                        version: env!("CARGO_PKG_VERSION").into(),
                     },
                 }).map_err(MCPError::from)
             }
-
             "tools/list" => Ok(self.list_tools()),
-            "tools/call" => self.handle_tool_call(&req).await,
-
+            "tools/call" => self.handle_tool_call_with_cancellation(&req).await,
             "prompts/list" => Ok(self.list_prompts()),
             "prompts/get" => self.handle_prompt_get(&req).await,
-
             "resources/list" => Ok(self.list_resources()),
             "resources/read" => self.handle_resource_read(&req).await,
-
             other => Err(MCPError::MethodNotFound(other.into())),
         };
 
@@ -210,14 +239,69 @@ impl<H: ToolHandler> SystemMCPServer<H> {
         }
     }
 
-    async fn handle_tool_call(&self, req: &MCPRequest) -> Result<Value, MCPError> {
+    async fn handle_cancellation(&self, req: &MCPRequest) {
+        if let Some(params) = &req.params {
+            if let Some(request_id) = params.get("requestId").and_then(Value::as_str) {
+                let reason = params.get("reason").and_then(Value::as_str);
+
+                // Signal cancellation to active request
+                {
+                    let mut active = self.active_requests.write().await;
+                    if let Some(cancel_tx) = active.remove(request_id) {
+                        let _ = cancel_tx.send(());
+                        eprintln!("[CANCEL] Request {} cancelled: {:?}", request_id, reason);
+
+                        // Notify handler
+                        self.handler.on_request_cancelled(request_id, reason).await;
+                    }
+                }
+            }
+        }
+    }
+
+    async fn handle_tool_call_with_cancellation(&self, req: &MCPRequest) -> Result<Value, MCPError> {
+        let request_id = req.id.as_ref()
+            .map(|id| id.to_string())
+            .unwrap_or_else(|| "unknown".to_string());
+
+        let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
+
+        // Register cancellation handler
+        {
+            let mut active = self.active_requests.write().await;
+            active.insert(request_id.clone(), cancel_tx);
+        }
+
+        // Create progress sender for this request
+        let progress_sender = ProgressSender::new(self.notification_tx.clone());
+
+        // Execute with cancellation support
+        let result = tokio::select! {
+            result = self.handle_tool_call(req, progress_sender) => {
+                result
+            }
+            _ = cancel_rx => {
+                eprintln!("[CANCEL] Tool call {} was cancelled", request_id);
+                Err(MCPError::RequestCancelled(request_id.clone()))
+            }
+        };
+
+        // Clean up
+        {
+            let mut active = self.active_requests.write().await;
+            active.remove(&request_id);
+        }
+
+        result
+    }
+
+    async fn handle_tool_call(&self, req: &MCPRequest, progress_sender: ProgressSender) -> Result<Value, MCPError> {
         match (req.params.as_ref(), req.params.as_ref().and_then(|p| p.get("name")).and_then(Value::as_str)) {
             (Some(params), Some(name)) => {
                 let args = params.get("arguments").unwrap_or(&Value::Null);
 
                 self.handler.on_tool_called(name).await;
-
-                let result = self.handler.call_tool(name, args).await;
+                let result = self.handler.call_tool(name, args, progress_sender).await;
                 let success = result.is_ok();
                 self.handler.on_tool_completed(name, success).await;
 

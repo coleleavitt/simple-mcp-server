@@ -27,6 +27,89 @@ impl ToolResponse {
     }
 }
 
+/// Progress notification for long-running operations
+#[derive(Debug, Serialize, Clone)]
+pub struct ProgressNotification {
+    #[serde(rename = "requestId")]
+    pub request_id: String,
+    pub progress: f64, // 0.0 to 1.0
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+
+/// Cancellation notification
+#[derive(Debug, Serialize, Clone)]
+pub struct CancellationNotification {
+    #[serde(rename = "requestId")]
+    pub request_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+/// JSON-RPC progress notification message (MCP protocol compliant)
+#[derive(Debug, Serialize, Clone)]
+pub struct ProgressNotificationMessage {
+    pub jsonrpc: String,
+    pub method: String,
+    pub params: ProgressParams,
+}
+
+/// Parameters for progress notifications
+#[derive(Debug, Serialize, Clone)]
+pub struct ProgressParams {
+    #[serde(rename = "requestId")]
+    pub request_id: String,
+    pub progress: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+
+impl ProgressNotificationMessage {
+    /// Create a new progress notification message
+    pub fn new(request_id: String, progress: f64, message: Option<String>) -> Self {
+        Self {
+            jsonrpc: "2.0".into(),
+            method: "notifications/progress".into(),
+            params: ProgressParams {
+                request_id,
+                progress,
+                message,
+            },
+        }
+    }
+}
+
+/// JSON-RPC cancellation notification message (MCP protocol compliant)
+#[derive(Debug, Serialize, Clone)]
+pub struct CancellationNotificationMessage {
+    pub jsonrpc: String,
+    pub method: String,
+    pub params: CancellationParams,
+}
+
+/// Parameters for cancellation notifications
+#[derive(Debug, Serialize, Clone)]
+pub struct CancellationParams {
+    #[serde(rename = "requestId")]
+    pub request_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+impl CancellationNotificationMessage {
+    /// Create a new cancellation notification message
+    pub fn new(request_id: String, reason: Option<String>) -> Self {
+        Self {
+            jsonrpc: "2.0".into(),
+            method: "notifications/cancelled".into(),
+            params: CancellationParams {
+                request_id,
+                reason,
+            },
+        }
+    }
+}
+
 /// Prompt definition with parameters
 #[derive(Debug, Serialize, Clone)]
 pub struct Prompt {
