@@ -186,7 +186,7 @@ impl<H: ToolHandler> SystemMCPServer<H> {
                     capabilities: self.capabilities.clone(),
                     server_info: ServerInfo {
                         name: "secure-system-mcp".into(),
-                        version: "0.5.0".into(),
+                        version: env!("CARGO_PKG_VERSION").into(),
                     },
                 }).map_err(MCPError::from)
             }
