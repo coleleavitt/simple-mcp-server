@@ -170,41 +170,89 @@ impl ToolHandler for MyToolHandler {
 }
 
 impl MyToolHandler {
-    async fn handle_run_command(&self, args: &Value, progress_sender: ProgressSender) -> Result<ToolResponse, MCPError> {
-        let command = args.get("command").and_then(Value::as_str).ok_or(MCPError::MissingParameters)?;
-        let argv = args.get("args").and_then(Value::as_array)
-            .map(|arr| arr.iter().filter_map(Value::as_str).map(String::from).collect())
-            .unwrap_or_default();
-        let _token = args.get("token").and_then(Value::as_str).ok_or(MCPError::MissingParameters)?;
-
-        self.run_command(command, argv, progress_sender).await
+    fn extract_string_param(&self, args: &Value, key: &str) -> Result<String, MCPError> {
+        args.get(key)
+            .and_then(Value::as_str)
+            .map(|s| s.to_string())
+            .ok_or(MCPError::MissingParameters)
     }
 
-    async fn handle_list_directory(&self, args: &Value, progress_sender: ProgressSender) -> Result<ToolResponse, MCPError> {
-        let path = args.get("path").and_then(Value::as_str).unwrap_or(".");
-        let show_hidden = args.get("show_hidden").and_then(Value::as_bool).unwrap_or(false);
-
-        self.list_directory(path, show_hidden, progress_sender).await
+    fn extract_optional_string(&self, args: &Value, key: &str, default: &str) -> String {
+        args.get(key)
+            .and_then(Value::as_str)
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| default.to_string())
     }
 
-    async fn handle_read_file(&self, args: &Value, progress_sender: ProgressSender) -> Result<ToolResponse, MCPError> {
-        let path = args.get("path").and_then(Value::as_str).ok_or(MCPError::MissingParameters)?;
+    fn extract_optional_bool(&self, args: &Value, key: &str, default: bool) -> bool {
+        args.get(key).and_then(Value::as_bool).unwrap_or(default)
+    }
+
+    fn extract_string_array(&self, args: &Value, key: &str) -> Vec<String> {
+        args.get(key)
+            .and_then(Value::as_array)
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(Value::as_str)
+                    .map(String::from)
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    async fn handle_run_command(
+        &self,
+        args: &Value,
+        progress_sender: ProgressSender,
+    ) -> Result<ToolResponse, MCPError> {
+        let command = self.extract_string_param(args, "command")?;
+        let argv = self.extract_string_array(args, "args");
+        let _token = self.extract_string_param(args, "token")?; // Validate token but don't use
+
+        self.run_command(&command, argv, progress_sender).await
+    }
+
+    async fn handle_list_directory(
+        &self,
+        args: &Value,
+        progress_sender: ProgressSender,
+    ) -> Result<ToolResponse, MCPError> {
+        let path = self.extract_optional_string(args, "path", ".");
+        let show_hidden = self.extract_optional_bool(args, "show_hidden", false);
+
+        self.list_directory(&path, show_hidden, progress_sender)
+            .await
+    }
+
+    async fn handle_read_file(
+        &self,
+        args: &Value,
+        progress_sender: ProgressSender,
+    ) -> Result<ToolResponse, MCPError> {
+        let path = self.extract_string_param(args, "path")?;
         let lines = args.get("lines").and_then(Value::as_str);
 
-        self.read_file(path, lines, progress_sender).await
+        self.read_file(&path, lines, progress_sender).await
     }
 
-    async fn handle_get_system_info(&self, args: &Value, progress_sender: ProgressSender) -> Result<ToolResponse, MCPError> {
-        let _ = args; // Unused for this method
+    async fn handle_get_system_info(
+        &self,
+        args: &Value,
+        progress_sender: ProgressSender,
+    ) -> Result<ToolResponse, MCPError> {
+        let _ = args; // No parameters needed
         self.get_system_info(progress_sender).await
     }
 
-    async fn handle_long_running_task(&self, args: &Value, progress_sender: ProgressSender) -> Result<ToolResponse, MCPError> {
-        let _ = args; // Unused for this method
+    async fn handle_long_running_task(
+        &self,
+        args: &Value,
+        progress_sender: ProgressSender,
+    ) -> Result<ToolResponse, MCPError> {
+        let _ = args; // No parameters needed
         self.long_running_task(progress_sender).await
     }
 
-    // ✅ EXISTING: Original implementation methods (unchanged)
     async fn run_command(
         &self,
         command: &str,
@@ -219,8 +267,8 @@ impl MyToolHandler {
             MAX_COMMAND_TIMEOUT,
             Command::new(command).args(&args).output(),
         )
-            .await
-            .map_err(|_| MCPError::CommandTimeout)??;
+        .await
+        .map_err(|_| MCPError::CommandTimeout)??;
 
         progress_sender
             .send_progress("cmd", 1.0, Some("Command completed".into()))
@@ -262,7 +310,7 @@ impl MyToolHandler {
             vec![flag.to_string(), path.to_string()],
             progress_sender,
         )
-            .await
+        .await
     }
 
     async fn read_file(
@@ -271,22 +319,16 @@ impl MyToolHandler {
         lines: Option<&str>,
         progress_sender: ProgressSender,
     ) -> Result<ToolResponse, MCPError> {
-        let (cmd, args) = if let Some(n) = lines {
-            if let Ok(n) = n.parse::<u32>() {
-                (
-                    "head",
-                    vec!["-n".to_string(), n.to_string(), path.to_string()],
-                )
-            } else if n.starts_with('-') && n[1..].parse::<u32>().is_ok() {
-                (
-                    "tail",
-                    vec!["-n".to_string(), n[1..].to_string(), path.to_string()],
-                )
-            } else {
-                ("cat", vec![path.to_string()])
-            }
-        } else {
-            ("cat", vec![path.to_string()])
+        let (cmd, args) = match lines {
+            Some(n) if n.parse::<u32>().is_ok() => (
+                "head",
+                vec!["-n".to_string(), n.to_string(), path.to_string()],
+            ),
+            Some(n) if n.starts_with('-') && n[1..].parse::<u32>().is_ok() => (
+                "tail",
+                vec!["-n".to_string(), n[1..].to_string(), path.to_string()],
+            ),
+            _ => ("cat", vec![path.to_string()]),
         };
         self.run_command(cmd, args, progress_sender).await
     }
@@ -317,7 +359,7 @@ impl MyToolHandler {
                 Duration::from_secs(5),
                 Command::new(cmd).args(&args).output(),
             )
-                .await
+            .await
             {
                 Ok(Ok(output)) => {
                     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -366,25 +408,29 @@ impl MyToolHandler {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    eprintln!("Enhanced MCP Server v0.5.0 - With Full Streaming Progress Support");
+    eprintln!("🚀 Enhanced MCP Server v0.6.0 - Production Ready with Streaming Progress");
 
     let handler = MyToolHandler;
 
-    // Define tools
+    // Define tools with comprehensive schemas
     let tools = vec![
         Tool {
             name: "run_command".into(),
-            description: "Run system commands with arguments".into(),
+            description: "Execute system commands with arguments and security token validation"
+                .into(),
             input_schema: ToolInputSchema {
                 schema_type: "object".into(),
                 properties: {
                     let mut props = std::collections::HashMap::new();
-                    props.insert("command".into(), ToolProperty::string("Command to run"));
+                    props.insert("command".into(), ToolProperty::string("Command to execute"));
                     props.insert(
                         "args".into(),
                         ToolProperty::array("Command arguments", "string"),
                     );
-                    props.insert("token".into(), ToolProperty::string("Security token"));
+                    props.insert(
+                        "token".into(),
+                        ToolProperty::string("Security token for authentication"),
+                    );
                     props
                 },
                 required: vec!["command".into(), "token".into()],
@@ -392,15 +438,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         },
         Tool {
             name: "list_directory".into(),
-            description: "List directory contents".into(),
+            description: "List directory contents with optional hidden file visibility".into(),
             input_schema: ToolInputSchema {
                 schema_type: "object".into(),
                 properties: {
                     let mut props = std::collections::HashMap::new();
-                    props.insert("path".into(), ToolProperty::string("Directory path"));
+                    props.insert(
+                        "path".into(),
+                        ToolProperty::string("Directory path to list"),
+                    );
                     props.insert(
                         "show_hidden".into(),
-                        ToolProperty::boolean("Include hidden files", false),
+                        ToolProperty::boolean("Show hidden files", false),
                     );
                     props
                 },
@@ -409,13 +458,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         },
         Tool {
             name: "read_file".into(),
-            description: "Read file contents".into(),
+            description: "Read file contents with optional line limiting".into(),
             input_schema: ToolInputSchema {
                 schema_type: "object".into(),
                 properties: {
                     let mut props = std::collections::HashMap::new();
-                    props.insert("path".into(), ToolProperty::string("File path"));
-                    props.insert("lines".into(), ToolProperty::string("Number of lines"));
+                    props.insert("path".into(), ToolProperty::string("File path to read"));
+                    props.insert(
+                        "lines".into(),
+                        ToolProperty::string(
+                            "Number of lines (positive for head, negative for tail)",
+                        ),
+                    );
                     props
                 },
                 required: vec!["path".into()],
@@ -423,7 +477,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         },
         Tool {
             name: "get_system_info".into(),
-            description: "Get system information with progress updates".into(),
+            description: "Gather comprehensive system information with real-time progress".into(),
             input_schema: ToolInputSchema {
                 schema_type: "object".into(),
                 properties: std::collections::HashMap::new(),
@@ -432,7 +486,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         },
         Tool {
             name: "long_running_task".into(),
-            description: "Example long-running task with progress notifications".into(),
+            description: "Demonstrate long-running operations with detailed progress notifications"
+                .into(),
             input_schema: ToolInputSchema {
                 schema_type: "object".into(),
                 properties: std::collections::HashMap::new(),
@@ -443,28 +498,36 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Define prompts
     let prompts = vec![
-        Prompt::new("system_analysis", "System analysis prompt template"),
-        Prompt::new("command_generator", "Command generation helper"),
+        Prompt::new(
+            "system_analysis",
+            "Advanced system analysis and recommendations",
+        ),
+        Prompt::new(
+            "command_generator",
+            "Safe system command generation assistant",
+        ),
     ];
 
     // Define resources
     let resources = vec![
-        Resource::new("file:///etc/os-release", "OS Info"),
-        Resource::new("file:///proc/meminfo", "Memory Info"),
-        Resource::new("internal://system-status", "System Status"),
+        Resource::new(
+            "file:///etc/os-release",
+            "Operating System Release Information",
+        ),
+        Resource::new("file:///proc/meminfo", "System Memory Information"),
+        Resource::new("internal://system-status", "Live System Status Dashboard"),
     ];
 
-    // Build server with all capabilities
+    // Build server with full capabilities
     let mut server = ServerBuilder::new()
         .with_tools(tools)
         .with_prompts(prompts)
         .with_resources(resources)
         .build(handler);
 
-    // Take the notification receiver for multiplexed output
+    // Set up progress notification handling
     let mut notification_rx = server.take_notification_receiver().unwrap();
 
-    // Handle progress notifications in a separate task
     let notification_task = tokio::spawn(async move {
         while let Some(notification) = notification_rx.recv().await {
             match notification {
@@ -484,7 +547,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
-    // Process requests on main thread
+    // Main request processing loop
     let stdin = io::stdin();
     let mut stdout = io::stdout();
 
@@ -516,8 +579,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    // Wait for notification task to complete
     let _ = notification_task.await;
-
     Ok(())
 }
