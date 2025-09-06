@@ -1,4 +1,5 @@
 pub mod error;
+pub mod macros;
 pub mod notifications;
 pub mod prelude;
 pub mod request;
