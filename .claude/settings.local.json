@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cargo check:*)",
+      "Read(//home/cole/RustProjects/forks/rust-sdk/crates/rmcp/**)",
+      "Read(//home/cole/RustProjects/forks/rust-sdk/**)",
+      "Bash(find:*)",
+      "Bash(cargo:*)",
+      "Bash(timeout 2s cargo run)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}
