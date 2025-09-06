@@ -14,8 +14,6 @@ use std::sync::Arc;
 use tokio::sync::{mpsc, RwLock};
 use tokio_stream::Stream;
 
-// ← REMOVED: ServerNotification and ProgressSender definitions (now in notifications.rs)
-
 #[async_trait]
 pub trait ToolHandler: Send + Sync {
     // Tool methods
