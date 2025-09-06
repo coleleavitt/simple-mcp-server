@@ -1,4 +1,4 @@
-use serde::{Serialize};
+use serde::Serialize;
 use serde_json::Value;
 use std::collections::HashMap;
 
@@ -27,6 +27,72 @@ impl ToolResponse {
     }
 }
 
+/// Prompt definition with parameters
+#[derive(Debug, Serialize, Clone)]
+pub struct Prompt {
+    pub name: String,
+    pub description: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub arguments: Option<Vec<PromptArgument>>,
+}
+
+/// Prompt argument definition
+#[derive(Debug, Serialize, Clone)]
+pub struct PromptArgument {
+    pub name: String,
+    pub description: String,
+    pub required: bool,
+}
+
+/// Prompt response with messages
+#[derive(Debug, Serialize, Clone)]
+pub struct PromptResponse {
+    pub description: String,
+    pub messages: Vec<PromptMessage>,
+}
+
+/// Individual prompt message
+#[derive(Debug, Serialize, Clone)]
+pub struct PromptMessage {
+    pub role: String, // "user", "assistant", "system"
+    pub content: PromptContent,
+}
+
+/// Prompt message content
+#[derive(Debug, Serialize, Clone)]
+pub struct PromptContent {
+    #[serde(rename = "type")]
+    pub content_type: String, // "text"
+    pub text: String,
+}
+
+/// Resource definition
+#[derive(Debug, Serialize, Clone)]
+pub struct Resource {
+    pub uri: String,
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(rename = "mimeType", skip_serializing_if = "Option::is_none")]
+    pub mime_type: Option<String>,
+}
+
+/// Resource content response
+#[derive(Debug, Serialize, Clone)]
+pub struct ResourceContent {
+    pub uri: String,
+    #[serde(rename = "mimeType")]
+    pub mime_type: String,
+    pub text: String,
+}
+
+/// Streaming chunk for long operations
+#[derive(Debug, Serialize, Clone)]
+pub struct StreamChunk {
+    pub chunk_type: String, // "progress", "data", "complete", "error"
+    pub data: Value,
+}
+
 /// Server capabilities object
 #[derive(Debug, Serialize, Clone)]
 pub struct ServerCapabilities {
@@ -52,7 +118,7 @@ pub struct ServerInfo {
     pub version: String,
 }
 
-/// Schema for a single tool’s inputs
+/// Schema for a single tool's inputs
 #[derive(Debug, Serialize, Clone)]
 pub struct ToolInputSchema {
     #[serde(rename = "type")]
@@ -61,7 +127,7 @@ pub struct ToolInputSchema {
     pub required: Vec<String>,
 }
 
-/// One property in a tool’s input schema
+/// One property in a tool's input schema
 #[derive(Debug, Serialize, Clone)]
 pub struct ToolProperty {
     #[serde(rename = "type")]
@@ -80,7 +146,7 @@ pub struct ToolPropertyItems {
     pub item_type: String,
 }
 
-/// One tool’s metadata
+/// One tool's metadata
 #[derive(Debug, Serialize, Clone)]
 pub struct Tool {
     pub name: String,
@@ -115,5 +181,51 @@ impl ToolProperty {
             items: None,
             default: Some(Value::Bool(default)),
         }
+    }
+}
+
+impl Prompt {
+    pub fn new(name: impl Into<String>, description: impl Into<String>) -> Self {
+        Prompt {
+            name: name.into(),
+            description: description.into(),
+            arguments: None,
+        }
+    }
+
+    pub fn with_arguments(mut self, args: Vec<PromptArgument>) -> Self {
+        self.arguments = Some(args);
+        self
+    }
+}
+
+impl PromptArgument {
+    pub fn new(name: impl Into<String>, description: impl Into<String>, required: bool) -> Self {
+        PromptArgument {
+            name: name.into(),
+            description: description.into(),
+            required,
+        }
+    }
+}
+
+impl Resource {
+    pub fn new(uri: impl Into<String>, name: impl Into<String>) -> Self {
+        Resource {
+            uri: uri.into(),
+            name: name.into(),
+            description: None,
+            mime_type: None,
+        }
+    }
+
+    pub fn with_description(mut self, description: impl Into<String>) -> Self {
+        self.description = Some(description.into());
+        self
+    }
+
+    pub fn with_mime_type(mut self, mime_type: impl Into<String>) -> Self {
+        self.mime_type = Some(mime_type.into());
+        self
     }
 }
