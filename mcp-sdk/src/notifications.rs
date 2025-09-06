@@ -23,12 +23,12 @@ impl ProgressSender {
     }
 
     /// Send a progress notification
-    pub async fn send_progress(&self, request_id: &str, progress: f64, message: Option<String>) {
+    pub async fn send_progress(&self, request_id: &str, progress: f64, message: Option<String>) -> Result<(), mpsc::error::SendError<ServerNotification>> {
         let notification = ServerNotification::Progress {
             request_id: request_id.to_string(),
             progress,
             message,
         };
-        let _ = self.sender.send(notification);
+        self.sender.send(notification)
     }
 }
