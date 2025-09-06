@@ -257,7 +257,7 @@ impl MyToolHandler {
         args: Vec<String>,
         progress_sender: ProgressSender,
     ) -> Result<ToolResponse, MCPError> {
-        progress_sender
+        let _ = progress_sender
             .send_progress("cmd", 0.0, Some("Starting command execution".into()))
             .await;
 
@@ -268,7 +268,7 @@ impl MyToolHandler {
         .await
         .map_err(|_| MCPError::CommandTimeout)??;
 
-        progress_sender
+        let _ = progress_sender
             .send_progress("cmd", 1.0, Some("Command completed".into()))
             .await;
 
@@ -348,7 +348,7 @@ impl MyToolHandler {
 
         for (i, (cmd, args)) in cmds.iter().enumerate() {
             let progress = (i as f64) / (total_cmds as f64);
-            progress_sender
+            let _ = progress_sender
                 .send_progress("sysinfo", progress, Some(format!("Running {}", cmd)))
                 .await;
 
@@ -367,7 +367,7 @@ impl MyToolHandler {
             }
         }
 
-        progress_sender
+        let _ = progress_sender
             .send_progress(
                 "sysinfo",
                 1.0,
@@ -388,7 +388,7 @@ impl MyToolHandler {
         for i in 1..=10 {
             tokio::time::sleep(Duration::from_millis(500)).await;
             let progress = i as f64 / 10.0;
-            progress_sender
+            let _ = progress_sender
                 .send_progress(
                     "longtask",
                     progress,
