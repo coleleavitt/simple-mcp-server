@@ -26,6 +26,8 @@ pub enum MCPError {
     OutputTooLarge,
     #[error("Stream error: {0}")]
     StreamError(String),
+    #[error("Request was cancelled: {0}")]
+    RequestCancelled(String),
     #[error("IO error: {0}")]
     IoError(#[from] std::io::Error),
     #[error("JSON error: {0}")]
@@ -47,6 +49,7 @@ impl MCPError {
             MCPError::MethodNotFound(_) => (-32601, self.to_string()),
             MCPError::MissingParameters | MCPError::MissingToolName => (-32602, self.to_string()),
             MCPError::UnknownPrompt(_) | MCPError::UnknownResource(_) | MCPError::ResourceNotFound(_) => (-32602, self.to_string()),
+            MCPError::RequestCancelled(_) => (-32800, self.to_string()), // Custom cancellation code
             _ => (-32603, self.to_string()),
         };
         JsonRpcError { code, message, data: None }

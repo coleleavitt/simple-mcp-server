@@ -1,7 +1,10 @@
 use async_trait::async_trait;
 use mcp_sdk::{
-    tools::{Tool, ToolInputSchema, ToolProperty, ToolResponse, Prompt, PromptArgument, PromptResponse, PromptMessage, PromptContent, Resource, ResourceContent},
-    MCPRequest, MCPResponse, ServerBuilder, ToolHandler, MCPError
+    tools::{Tool, ToolInputSchema, ToolProperty, ToolResponse, Prompt, PromptArgument,
+            PromptResponse, PromptMessage, PromptContent, Resource, ResourceContent,
+            ProgressNotificationMessage}, // Import the SDK progress types
+    MCPRequest, MCPResponse, ServerBuilder, ToolHandler, MCPError,
+    ProgressSender, ServerNotification
 };
 use std::io::{self, BufRead, Write};
 use tokio::process::Command;
@@ -16,7 +19,7 @@ struct MyToolHandler;
 
 #[async_trait]
 impl ToolHandler for MyToolHandler {
-    async fn call_tool(&self, name: &str, args: &Value) -> Result<ToolResponse, MCPError> {
+    async fn call_tool(&self, name: &str, args: &Value, progress_sender: ProgressSender) -> Result<ToolResponse, MCPError> {
         match name {
             "run_command" => {
                 let command = args.get("command").and_then(Value::as_str).ok_or(MCPError::MissingParameters)?;
@@ -24,20 +27,23 @@ impl ToolHandler for MyToolHandler {
                     arr.iter().filter_map(Value::as_str).map(String::from).collect()
                 }).unwrap_or_default();
                 let _token = args.get("token").and_then(Value::as_str).ok_or(MCPError::MissingParameters)?;
-                self.run_command(command, argv).await
+                self.run_command(command, argv, progress_sender).await
             }
             "list_directory" => {
                 let path = args.get("path").and_then(Value::as_str).unwrap_or(".");
                 let show_hidden = args.get("show_hidden").and_then(Value::as_bool).unwrap_or(false);
-                self.list_directory(path, show_hidden).await
+                self.list_directory(path, show_hidden, progress_sender).await
             }
             "read_file" => {
                 let path = args.get("path").and_then(Value::as_str).ok_or(MCPError::MissingParameters)?;
                 let lines = args.get("lines").and_then(Value::as_str);
-                self.read_file(path, lines).await
+                self.read_file(path, lines, progress_sender).await
             }
             "get_system_info" => {
-                self.get_system_info().await
+                self.get_system_info(progress_sender).await
+            }
+            "long_running_task" => {
+                self.long_running_task(progress_sender).await
             }
             _ => Err(MCPError::UnknownTool(name.into())),
         }
@@ -159,12 +165,20 @@ impl ToolHandler for MyToolHandler {
         let status = if success { "SUCCESS" } else { "FAILED" };
         eprintln!("[TOOL] Completed: {} - {}", name, status);
     }
+
+    async fn on_request_cancelled(&self, request_id: &str, reason: Option<&str>) {
+        eprintln!("[CANCEL] Request {} cancelled: {:?}", request_id, reason);
+    }
 }
 
 impl MyToolHandler {
-    async fn run_command(&self, command: &str, args: Vec<String>) -> Result<ToolResponse, MCPError> {
+    async fn run_command(&self, command: &str, args: Vec<String>, progress_sender: ProgressSender) -> Result<ToolResponse, MCPError> {
+        progress_sender.send_progress("cmd", 0.0, Some("Starting command execution".into())).await;
+
         let output = timeout(MAX_COMMAND_TIMEOUT, Command::new(command).args(&args).output())
             .await.map_err(|_| MCPError::CommandTimeout)??;
+
+        progress_sender.send_progress("cmd", 1.0, Some("Command completed".into())).await;
 
         let stdout = String::from_utf8_lossy(&output.stdout);
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -183,12 +197,12 @@ impl MyToolHandler {
         Ok(ToolResponse::new(text, !success))
     }
 
-    async fn list_directory(&self, path: &str, show_hidden: bool) -> Result<ToolResponse, MCPError> {
+    async fn list_directory(&self, path: &str, show_hidden: bool, progress_sender: ProgressSender) -> Result<ToolResponse, MCPError> {
         let flag = if show_hidden { "-la" } else { "-l" };
-        self.run_command("ls", vec![flag.to_string(), path.to_string()]).await
+        self.run_command("ls", vec![flag.to_string(), path.to_string()], progress_sender).await
     }
 
-    async fn read_file(&self, path: &str, lines: Option<&str>) -> Result<ToolResponse, MCPError> {
+    async fn read_file(&self, path: &str, lines: Option<&str>, progress_sender: ProgressSender) -> Result<ToolResponse, MCPError> {
         let (cmd, args) = if let Some(n) = lines {
             if let Ok(n) = n.parse::<u32>() {
                 ("head", vec!["-n".to_string(), n.to_string(), path.to_string()])
@@ -200,11 +214,10 @@ impl MyToolHandler {
         } else {
             ("cat", vec![path.to_string()])
         };
-
-        self.run_command(cmd, args).await
+        self.run_command(cmd, args, progress_sender).await
     }
 
-    async fn get_system_info(&self) -> Result<ToolResponse, MCPError> {
+    async fn get_system_info(&self, progress_sender: ProgressSender) -> Result<ToolResponse, MCPError> {
         let cmds = [
             ("uname", vec!["-a"]),
             ("whoami", vec![]),
@@ -214,7 +227,12 @@ impl MyToolHandler {
         ];
 
         let mut lines = Vec::new();
-        for (cmd, args) in &cmds {
+        let total_cmds = cmds.len();
+
+        for (i, (cmd, args)) in cmds.iter().enumerate() {
+            let progress = (i as f64) / (total_cmds as f64);
+            progress_sender.send_progress("sysinfo", progress, Some(format!("Running {}", cmd))).await;
+
             let args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
             match timeout(Duration::from_secs(5), Command::new(cmd).args(&args).output()).await {
                 Ok(Ok(output)) => {
@@ -225,14 +243,28 @@ impl MyToolHandler {
             }
         }
 
+        progress_sender.send_progress("sysinfo", 1.0, Some("System info collection complete".into())).await;
+
         let text = format!("System Information:\n{}", lines.join("\n"));
         Ok(ToolResponse::new(text, false))
+    }
+
+    async fn long_running_task(&self, progress_sender: ProgressSender) -> Result<ToolResponse, MCPError> {
+        eprintln!("[TASK] Starting long-running task with progress notifications...");
+
+        for i in 1..=10 {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            let progress = i as f64 / 10.0;
+            progress_sender.send_progress("longtask", progress, Some(format!("Processing step {} of 10", i))).await;
+        }
+
+        Ok(ToolResponse::new("Long-running task completed successfully with progress notifications".into(), false))
     }
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    eprintln!("Enhanced MCP Server v0.3.0 - With Prompts & Resources");
+    eprintln!("Enhanced MCP Server v0.5.0 - With Full Streaming Progress Support");
 
     let handler = MyToolHandler;
 
@@ -283,7 +315,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         },
         Tool {
             name: "get_system_info".into(),
-            description: "Get system information".into(),
+            description: "Get system information with progress updates".into(),
+            input_schema: ToolInputSchema {
+                schema_type: "object".into(),
+                properties: std::collections::HashMap::new(),
+                required: vec![],
+            },
+        },
+        Tool {
+            name: "long_running_task".into(),
+            description: "Example long-running task with progress notifications".into(),
             input_schema: ToolInputSchema {
                 schema_type: "object".into(),
                 properties: std::collections::HashMap::new(),
@@ -306,17 +347,41 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     ];
 
     // Build server with all capabilities
-    let server = ServerBuilder::new()
+    let mut server = ServerBuilder::new()
         .with_tools(tools)
         .with_prompts(prompts)
         .with_resources(resources)
         .build(handler);
 
+    // Take the notification receiver for multiplexed output
+    let mut notification_rx = server.take_notification_receiver().unwrap();
+
+    // ✅ FIXED: Handle progress notifications in a separate task
+    let notification_task = tokio::spawn(async move {
+        while let Some(notification) = notification_rx.recv().await {
+            match notification {
+                ServerNotification::Progress { request_id, progress, message } => {
+                    let notification_msg = ProgressNotificationMessage::new(request_id, progress, message);
+
+                    if let Ok(json) = serde_json::to_string(&notification_msg) {
+                        println!("{}", json);
+                        let _ = io::stdout().flush();
+                    }
+                }
+            }
+        }
+    });
+
+    // ✅ FIXED: Use blocking stdin reading without spawning
     let stdin = io::stdin();
     let mut stdout = io::stdout();
 
+    // Process requests on main thread to avoid Send issues
     for line in stdin.lock().lines() {
-        let raw = line?;
+        let raw = match line {
+            Ok(raw) => raw,
+            Err(_) => continue,
+        };
 
         if raw.len() > MAX_REQUEST_SIZE {
             let resp = MCPResponse::too_large();
@@ -339,6 +404,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     }
+
+    // Wait for notification task to complete
+    let _ = notification_task.await;
 
     Ok(())
 }
