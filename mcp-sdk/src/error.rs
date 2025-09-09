@@ -8,8 +8,8 @@ pub enum MCPError {
     InvalidJsonRpcVersion(String),
     #[error("Method not found: {0}")]
     MethodNotFound(String),
-    #[error("Missing parameters")]
-    MissingParameters,
+    #[error("Missing parameters: {0}")]
+    MissingParameters(String),
     #[error("Missing tool name")]
     MissingToolName,
     #[error("Unknown tool: {0}")]
@@ -47,11 +47,19 @@ impl MCPError {
         let (code, message) = match self {
             MCPError::InvalidJsonRpcVersion(_) => (-32600, self.to_string()),
             MCPError::MethodNotFound(_) => (-32601, self.to_string()),
-            MCPError::MissingParameters | MCPError::MissingToolName => (-32602, self.to_string()),
-            MCPError::UnknownPrompt(_) | MCPError::UnknownResource(_) | MCPError::ResourceNotFound(_) => (-32602, self.to_string()),
-            MCPError::RequestCancelled(_) => (-32800, self.to_string()), // Custom cancellation code
+            MCPError::MissingParameters(_) | MCPError::MissingToolName => {
+                (-32602, self.to_string())
+            }
+            MCPError::UnknownPrompt(_)
+            | MCPError::UnknownResource(_)
+            | MCPError::ResourceNotFound(_) => (-32602, self.to_string()),
+            MCPError::RequestCancelled(_) => (-32800, self.to_string()),
             _ => (-32603, self.to_string()),
         };
-        JsonRpcError { code, message, data: None }
+        JsonRpcError {
+            code,
+            message,
+            data: None,
+        }
     }
 }
