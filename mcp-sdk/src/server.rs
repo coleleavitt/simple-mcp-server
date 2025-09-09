@@ -1,23 +1,28 @@
 use crate::error::MCPError;
+use crate::notifications::{ProgressSender, ServerNotification};
 use crate::request::MCPRequest;
 use crate::response::MCPResponse;
-use crate::notifications::{ServerNotification, ProgressSender};
 use crate::tools::{
-    InitializeResponse, Prompt, PromptResponse, Resource, ResourceContent,
-    ServerCapabilities, ServerInfo, StreamChunk, Tool, ToolResponse
+    InitializeResponse, Prompt, PromptResponse, Resource, ResourceContent, ServerCapabilities,
+    ServerInfo, StreamChunk, Tool, ToolResponse,
 };
 use async_trait::async_trait;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::Arc;
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::{RwLock, mpsc};
 use tokio_stream::Stream;
 
 #[async_trait]
 pub trait ToolHandler: Send + Sync {
     // Tool methods
-    async fn call_tool(&self, name: &str, args: &Value, progress_sender: ProgressSender) -> Result<ToolResponse, MCPError>;
+    async fn call_tool(
+        &self,
+        name: &str,
+        args: &Value,
+        progress_sender: ProgressSender,
+    ) -> Result<ToolResponse, MCPError>;
 
     // Prompt methods
     async fn list_prompts(&self) -> Result<Vec<Prompt>, MCPError> {
@@ -39,7 +44,11 @@ pub trait ToolHandler: Send + Sync {
     }
 
     // Streaming method for long-running operations using tokio streams
-    async fn call_tool_stream(&self, name: &str, args: &Value) -> Result<Pin<Box<dyn Stream<Item = StreamChunk> + Send>>, MCPError> {
+    async fn call_tool_stream(
+        &self,
+        name: &str,
+        args: &Value,
+    ) -> Result<Pin<Box<dyn Stream<Item = StreamChunk> + Send>>, MCPError> {
         let _ = (name, args);
         Err(MCPError::StreamError("Streaming not supported".into()))
     }
@@ -69,6 +78,12 @@ pub struct ServerBuilder {
     capabilities: ServerCapabilities,
 }
 
+impl Default for ServerBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ServerBuilder {
     pub fn new() -> Self {
         ServerBuilder {
@@ -84,7 +99,12 @@ impl ServerBuilder {
         let mut map = serde_json::Map::new();
         map.insert(
             "tools".into(),
-            Value::Array(tools.into_iter().map(|t| serde_json::to_value(t).unwrap()).collect()),
+            Value::Array(
+                tools
+                    .into_iter()
+                    .map(|t| serde_json::to_value(t).unwrap())
+                    .collect(),
+            ),
         );
         self.capabilities.tools = map;
         self
@@ -94,7 +114,12 @@ impl ServerBuilder {
         let mut map = serde_json::Map::new();
         map.insert(
             "prompts".into(),
-            Value::Array(prompts.into_iter().map(|p| serde_json::to_value(p).unwrap()).collect()),
+            Value::Array(
+                prompts
+                    .into_iter()
+                    .map(|p| serde_json::to_value(p).unwrap())
+                    .collect(),
+            ),
         );
         self.capabilities.prompts = map;
         self
@@ -104,7 +129,12 @@ impl ServerBuilder {
         let mut map = serde_json::Map::new();
         map.insert(
             "resources".into(),
-            Value::Array(resources.into_iter().map(|r| serde_json::to_value(r).unwrap()).collect()),
+            Value::Array(
+                resources
+                    .into_iter()
+                    .map(|r| serde_json::to_value(r).unwrap())
+                    .collect(),
+            ),
         );
         self.capabilities.resources = map;
         self
@@ -137,24 +167,24 @@ impl<H: ToolHandler> SystemMCPServer<H> {
         ServerBuilder::new()
     }
 
-    pub fn take_notification_receiver(&mut self) -> Option<mpsc::UnboundedReceiver<ServerNotification>> {
+    pub fn take_notification_receiver(
+        &mut self,
+    ) -> Option<mpsc::UnboundedReceiver<ServerNotification>> {
         self.notification_rx.take()
     }
 
     fn validate_and_detect_version(&self, req: &MCPRequest) -> Result<JsonRpcVersion, MCPError> {
         #[cfg(all(feature = "schema-draft", not(feature = "schema-june-2025")))]
         {
-            // Strict mode: only allow 2.0, and require id for requests
+            // Strict mode: only allow 2.0
             if req.jsonrpc_version() != Some("2.0") {
                 return Err(MCPError::InvalidJsonRpcVersion(
-                    req.jsonrpc_version().unwrap_or("missing").to_string()
+                    req.jsonrpc_version().unwrap_or("missing").to_string(),
                 ));
             }
-            // In draft schema, all messages must have id (even notifications in some cases)
-            // But we still allow None for notifications for practical compatibility
             Ok(JsonRpcVersion::V2_0)
         }
-        #[cfg(feature = "schema-june-2025")]
+        #[cfg(not(all(feature = "schema-draft", not(feature = "schema-june-2025"))))]
         {
             // Flexible mode: support both 1.0 and 2.0
             match req.jsonrpc_version() {
@@ -188,30 +218,28 @@ impl<H: ToolHandler> SystemMCPServer<H> {
 
         // Handle notifications (no response)
         if req.is_notification() {
-            return match req.method.as_str() {
+            match req.method.as_str() {
                 "notifications/cancelled" => {
                     self.handle_cancellation(&req).await;
-                    None
                 }
                 "notifications/ping" => {
                     eprintln!("[PING] Received ping from client");
-                    None
                 }
-                _ => None,
+                _ => { /* Ignore unknown notifications */ }
             }
+            return None;
         }
 
         let result: Result<Value, MCPError> = match req.method.as_str() {
-            "initialize" => {
-                serde_json::to_value(InitializeResponse {
-                    protocol_version: "2024-11-05".into(),
-                    capabilities: self.capabilities.clone(),
-                    server_info: ServerInfo {
-                        name: "secure-system-mcp".into(),
-                        version: env!("CARGO_PKG_VERSION").into(),
-                    },
-                }).map_err(MCPError::from)
-            }
+            "initialize" => serde_json::to_value(InitializeResponse {
+                protocol_version: "2025-06-18".into(),
+                capabilities: self.capabilities.clone(),
+                server_info: ServerInfo {
+                    name: "simple-mcp-server".into(),
+                    version: env!("CARGO_PKG_VERSION").into(),
+                },
+            })
+            .map_err(MCPError::from),
             "tools/list" => Ok(self.list_tools()),
             "tools/call" => self.handle_tool_call_with_cancellation(&req).await,
             "prompts/list" => Ok(self.list_prompts()),
@@ -227,7 +255,12 @@ impl<H: ToolHandler> SystemMCPServer<H> {
         }
     }
 
-    fn create_success_response(&self, version: JsonRpcVersion, id: Option<Value>, result: Value) -> MCPResponse {
+    fn create_success_response(
+        &self,
+        version: JsonRpcVersion,
+        id: Option<Value>,
+        result: Value,
+    ) -> MCPResponse {
         match version {
             JsonRpcVersion::V1_0 => {
                 #[cfg(feature = "jsonrpc-1")]
@@ -236,6 +269,7 @@ impl<H: ToolHandler> SystemMCPServer<H> {
                 }
                 #[cfg(not(feature = "jsonrpc-1"))]
                 {
+                    // Fallback to default if v1 feature is not enabled
                     MCPResponse::success(id, result)
                 }
             }
@@ -246,13 +280,19 @@ impl<H: ToolHandler> SystemMCPServer<H> {
                 }
                 #[cfg(not(feature = "jsonrpc-2"))]
                 {
+                    // Fallback to default if v2 feature is not enabled
                     MCPResponse::success(id, result)
                 }
             }
         }
     }
 
-    fn create_error_response(&self, version: JsonRpcVersion, id: Option<Value>, error: MCPError) -> MCPResponse {
+    fn create_error_response(
+        &self,
+        version: JsonRpcVersion,
+        id: Option<Value>,
+        error: MCPError,
+    ) -> MCPResponse {
         let json_rpc_error = error.to_json_rpc_error();
         match version {
             JsonRpcVersion::V1_0 => {
@@ -278,39 +318,39 @@ impl<H: ToolHandler> SystemMCPServer<H> {
         }
     }
 
-
     async fn handle_cancellation(&self, req: &MCPRequest) {
         if let Some(params) = &req.params {
             if let Some(request_id) = params.get("requestId").and_then(Value::as_str) {
                 let reason = params.get("reason").and_then(Value::as_str);
 
                 // Signal cancellation to active request
-                {
-                    let mut active = self.active_requests.write().await;
-                    if let Some(cancel_tx) = active.remove(request_id) {
-                        let _ = cancel_tx.send(());
-                        eprintln!("[CANCEL] Request {} cancelled: {:?}", request_id, reason);
-
-                        // Notify handler
-                        self.handler.on_request_cancelled(request_id, reason).await;
-                    }
+                if let Some(cancel_tx) = self.active_requests.write().await.remove(request_id) {
+                    let _ = cancel_tx.send(());
+                    // Notify handler
+                    self.handler.on_request_cancelled(request_id, reason).await;
                 }
             }
         }
     }
 
-    async fn handle_tool_call_with_cancellation(&self, req: &MCPRequest) -> Result<Value, MCPError> {
-        let request_id = req.id.as_ref()
-            .map(|id| id.to_string())
+    async fn handle_tool_call_with_cancellation(
+        &self,
+        req: &MCPRequest,
+    ) -> Result<Value, MCPError> {
+        let request_id = req
+            .id
+            .as_ref()
+            .and_then(|id| id.as_str())
+            .map(|s| s.to_string())
             .unwrap_or_else(|| "unknown".to_string());
 
         let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
 
         // Register cancellation handler
-        {
-            let mut active = self.active_requests.write().await;
-            active.insert(request_id.clone(), cancel_tx);
-        }
+        self.active_requests
+            .write()
+            .await
+            .insert(request_id.clone(), cancel_tx);
 
         // Create progress sender for this request
         let progress_sender = ProgressSender::new(self.notification_tx.clone());
@@ -321,22 +361,28 @@ impl<H: ToolHandler> SystemMCPServer<H> {
                 result
             }
             _ = cancel_rx => {
-                eprintln!("[CANCEL] Tool call {} was cancelled", request_id);
                 Err(MCPError::RequestCancelled(request_id.clone()))
             }
         };
 
         // Clean up
-        {
-            let mut active = self.active_requests.write().await;
-            active.remove(&request_id);
-        }
+        self.active_requests.write().await.remove(&request_id);
 
         result
     }
 
-    async fn handle_tool_call(&self, req: &MCPRequest, progress_sender: ProgressSender) -> Result<Value, MCPError> {
-        match (req.params.as_ref(), req.params.as_ref().and_then(|p| p.get("name")).and_then(Value::as_str)) {
+    async fn handle_tool_call(
+        &self,
+        req: &MCPRequest,
+        progress_sender: ProgressSender,
+    ) -> Result<Value, MCPError> {
+        match (
+            req.params.as_ref(),
+            req.params
+                .as_ref()
+                .and_then(|p| p.get("name"))
+                .and_then(Value::as_str),
+        ) {
             (Some(params), Some(name)) => {
                 let args = params.get("arguments").unwrap_or(&Value::Null);
 
@@ -345,19 +391,28 @@ impl<H: ToolHandler> SystemMCPServer<H> {
                 let success = result.is_ok();
                 self.handler.on_tool_completed(name, success).await;
 
-                match result {
-                    Ok(tool_response) => serde_json::to_value(tool_response).map_err(MCPError::from),
-                    Err(e) => Err(e),
-                }
+                result.and_then(|resp| serde_json::to_value(resp).map_err(MCPError::from))
             }
-            (None, _) => Err(MCPError::MissingParameters),
+            // FIX: Provide a string message for MissingParameters
+            (None, _) => Err(MCPError::MissingParameters(
+                "Request is missing 'params' object for 'tools/call' method".to_string(),
+            )),
             (_, None) => Err(MCPError::MissingToolName),
         }
     }
 
     async fn handle_prompt_get(&self, req: &MCPRequest) -> Result<Value, MCPError> {
-        let params = req.params.as_ref().ok_or(MCPError::MissingParameters)?;
-        let name = params.get("name").and_then(Value::as_str).ok_or(MCPError::MissingParameters)?;
+        // FIX: Use .ok_or_else to provide a detailed message string
+        let params = req.params.as_ref().ok_or_else(|| {
+            MCPError::MissingParameters(
+                "Request is missing 'params' object for 'prompts/get' method".to_string(),
+            )
+        })?;
+        let name = params.get("name").and_then(Value::as_str).ok_or_else(|| {
+            MCPError::MissingParameters(
+                "Parameter 'name' is missing for 'prompts/get' method".to_string(),
+            )
+        })?;
         let args = params.get("arguments").unwrap_or(&Value::Null);
 
         let response = self.handler.get_prompt(name, args).await?;
@@ -365,8 +420,17 @@ impl<H: ToolHandler> SystemMCPServer<H> {
     }
 
     async fn handle_resource_read(&self, req: &MCPRequest) -> Result<Value, MCPError> {
-        let params = req.params.as_ref().ok_or(MCPError::MissingParameters)?;
-        let uri = params.get("uri").and_then(Value::as_str).ok_or(MCPError::MissingParameters)?;
+        // FIX: Use .ok_or_else to provide a detailed message string
+        let params = req.params.as_ref().ok_or_else(|| {
+            MCPError::MissingParameters(
+                "Request is missing 'params' object for 'resources/read' method".to_string(),
+            )
+        })?;
+        let uri = params.get("uri").and_then(Value::as_str).ok_or_else(|| {
+            MCPError::MissingParameters(
+                "Parameter 'uri' is missing for 'resources/read' method".to_string(),
+            )
+        })?;
 
         let content = self.handler.read_resource(uri).await?;
         serde_json::to_value(content).map_err(MCPError::from)
