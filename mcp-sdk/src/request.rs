@@ -1,54 +1,43 @@
-use serde::Deserialize;
+// mcp-sdk/src/request.rs
+
+#![allow(missing_docs)]
+
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+/// A progress token, used to associate progress notifications with the original request.
+/// This now lives in `request.rs` as it's part of the incoming request structure.
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq, Hash)]
+#[serde(untagged)]
+pub enum ProgressToken {
+    Integer(i64),
+    String(String),
+}
+
+/// The `_meta` field can be attached to any request or result.
+#[derive(Debug, Deserialize, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct RequestMeta {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub progress_token: Option<ProgressToken>,
+}
+
+/// A client request that expects a response.
 #[derive(Debug, Deserialize)]
 pub struct MCPRequest {
-    /// JSON-RPC version string
-    #[cfg(feature = "jsonrpc-1")]
     pub jsonrpc: Option<String>,
-    /// JSON-RPC version string, required in strict mode (schema-draft)
-    #[cfg(all(feature = "jsonrpc-2", not(feature = "jsonrpc-1")))]
-    pub jsonrpc: String,
-    
-    /// Request ID
-    #[cfg(feature = "schema-june-2025")]
     pub id: Option<Value>,
-    /// Request ID - required in draft schema for requests, omitted for notifications
-    #[cfg(all(feature = "schema-draft", not(feature = "schema-june-2025")))]
-    pub id: Option<Value>,  // Still optional for notifications
-    
     pub method: String,
     pub params: Option<Value>,
+    #[serde(rename = "_meta")]
+    pub meta: Option<RequestMeta>,
 }
 
 impl MCPRequest {
-    /// Get the JSON-RPC version, handling both optional and required cases
     pub fn jsonrpc_version(&self) -> Option<&str> {
-        #[cfg(feature = "jsonrpc-1")]
-        {
-            self.jsonrpc.as_deref()
-        }
-        #[cfg(all(feature = "jsonrpc-2", not(feature = "jsonrpc-1")))]
-        {
-            Some(&self.jsonrpc)
-        }
+        self.jsonrpc.as_deref()
     }
-    
-    /// Check if this is a JSON-RPC 2.0 request
-    pub fn is_v2(&self) -> bool {
-        self.jsonrpc_version() == Some("2.0")
-    }
-    
-    /// Check if this is a JSON-RPC 1.0 request (no version field or version "1.0")
-    pub fn is_v1(&self) -> bool {
-        match self.jsonrpc_version() {
-            None => true,
-            Some("1.0") => true,
-            _ => false,
-        }
-    }
-    
-    /// Check if this is a notification (no id field)
+
     pub fn is_notification(&self) -> bool {
         self.id.is_none()
     }

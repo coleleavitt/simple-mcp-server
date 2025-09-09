@@ -1,34 +1,51 @@
+// mcp-sdk/src/notifications.rs
+
+#![allow(missing_docs)]
+
+use crate::request::ProgressToken;
+use serde::Serialize;
 use tokio::sync::mpsc;
 
-/// Notification types for multiplexed output
-#[derive(Debug, Clone)]
+/// Represents a notification that the server can send to the client.
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "method", content = "params")]
 pub enum ServerNotification {
+    #[serde(rename = "notifications/progress")]
     Progress {
-        request_id: String,
+        progress_token: ProgressToken,
         progress: f64,
+        #[serde(skip_serializing_if = "Option::is_none")]
         message: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        total: Option<u64>,
     },
+    #[serde(rename = "notifications/resources/updated")]
+    ResourceUpdated { uri: String },
 }
 
-/// Progress sender for handlers to use
+/// Provides a way for tool handlers to send progress updates.
 #[derive(Debug, Clone)]
 pub struct ProgressSender {
+    token: Option<ProgressToken>,
     sender: mpsc::UnboundedSender<ServerNotification>,
 }
 
 impl ProgressSender {
-    /// Create a new progress sender from an unbounded channel sender
-    pub fn new(sender: mpsc::UnboundedSender<ServerNotification>) -> Self {
-        Self { sender }
+    /// Creates a new progress sender.
+    pub fn new(token: Option<ProgressToken>, sender: mpsc::UnboundedSender<ServerNotification>) -> Self {
+        Self { token, sender }
     }
 
-    /// Send a progress notification
-    pub async fn send_progress(&self, request_id: &str, progress: f64, message: Option<String>) -> Result<(), mpsc::error::SendError<ServerNotification>> {
-        let notification = ServerNotification::Progress {
-            request_id: request_id.to_string(),
-            progress,
-            message,
-        };
-        self.sender.send(notification)
+    /// Sends a progress update. Does nothing if no progress token was provided by the client.
+    pub fn send(&self, progress: f64, message: Option<String>) {
+        if let Some(token) = &self.token {
+            let notification = ServerNotification::Progress {
+                progress_token: token.clone(),
+                progress,
+                message,
+                total: None,
+            };
+            let _ = self.sender.send(notification);
+        }
     }
 }

@@ -1,17 +1,21 @@
 // src/main.rs
 
+#![allow(missing_docs)]
+
 use async_trait::async_trait;
 use mcp_sdk::error::MCPError;
 use mcp_sdk::notifications::ProgressSender;
 use mcp_sdk::request::MCPRequest;
 use mcp_sdk::server::{SystemMCPServer, ToolHandler};
 use mcp_sdk::tools::{
-    CallToolResult, ContentBlock, ReadResourceResult, TextContent, Tool, ToolInputSchema,
+    CallToolResult, CompleteResult, CompletionList, ContentBlock, EmptyResult, GetPromptResult,
+    Implementation, InitializeResponse, ListPromptsResult, ListResourceTemplatesResult,
+    ListResourcesResult, ListToolsResult, Prompt, PromptMessage, ReadResourceResult,
+    ServerCapabilities, TextContent, Tool, ToolInputSchema,
 };
 use serde_json::Value;
 use std::collections::HashMap;
 use std::process::Stdio;
-// FIX: Import the trait that provides the .read_line() method
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 use std::time::Duration;
@@ -20,7 +24,28 @@ struct BashToolHandler;
 
 #[async_trait]
 impl ToolHandler for BashToolHandler {
-    async fn list_tools(&self) -> Result<Vec<Tool>, MCPError> {
+    async fn initialize(&self, mut capabilities: ServerCapabilities) -> Result<InitializeResponse, MCPError> {
+        // Announce that this server provides tools, resources, and prompts.
+        capabilities.tools = Some(Default::default());
+        capabilities.resources = Some(Default::default());
+        capabilities.prompts = Some(Default::default());
+        capabilities.completions = Some(Default::default());
+
+        Ok(InitializeResponse {
+            protocol_version: "2025-06-18".to_string(),
+            server_info: Implementation {
+                name: "simple-mcp-server".to_string(),
+                version: env!("CARGO_PKG_VERSION").to_string(),
+                title: Some("Simple Bash Server".to_string()),
+            },
+            capabilities,
+        })
+    }
+
+    async fn list_tools(&self, cursor: Option<String>) -> Result<ListToolsResult, MCPError> {
+        if cursor.is_some() {
+            return Ok(ListToolsResult { tools: vec![], next_cursor: None });
+        }
         let bash_tool = Tool {
             name: "bash".to_string(),
             title: Some("Bash Command Executor".to_string()),
@@ -38,7 +63,10 @@ impl ToolHandler for BashToolHandler {
             output_schema: None,
             annotations: None,
         };
-        Ok(vec![bash_tool])
+        Ok(ListToolsResult {
+            tools: vec![bash_tool],
+            next_cursor: None,
+        })
     }
 
     async fn call_tool(
@@ -53,8 +81,80 @@ impl ToolHandler for BashToolHandler {
         }
     }
 
+    async fn list_resources(&self, _cursor: Option<String>) -> Result<ListResourcesResult, MCPError> {
+        Ok(ListResourcesResult { resources: vec![], next_cursor: None })
+    }
+
     async fn read_resource(&self, uri: &str) -> Result<ReadResourceResult, MCPError> {
         Err(MCPError::ResourceNotFound(uri.to_string()))
+    }
+
+    async fn list_prompts(&self, _cursor: Option<String>) -> Result<ListPromptsResult, MCPError> {
+        let hello_prompt = Prompt {
+            name: "hello".to_string(),
+            title: Some("Hello World Prompt".to_string()),
+            description: Some("A simple prompt that says hello.".to_string()),
+            arguments: None,
+        };
+        Ok(ListPromptsResult {
+            prompts: vec![hello_prompt],
+            next_cursor: None,
+        })
+    }
+
+    async fn get_prompt(&self, name: &str, _args: &Value) -> Result<GetPromptResult, MCPError> {
+        match name {
+            "hello" => Ok(GetPromptResult {
+                description: Some("A friendly greeting.".to_string()),
+                messages: vec![PromptMessage {
+                    role: "user".to_string(),
+                    content: ContentBlock::Text(TextContent {
+                        text: "Hello, world!".to_string(),
+                        annotations: None,
+                    }),
+                }],
+            }),
+            _ => Err(MCPError::UnknownPrompt(name.to_string())),
+        }
+    }
+
+    async fn ping(&self) -> Result<EmptyResult, MCPError> {
+        eprintln!("[INFO] Received ping, sending pong.");
+        Ok(EmptyResult {})
+    }
+
+    async fn list_resource_templates(&self, _cursor: Option<String>) -> Result<ListResourceTemplatesResult, MCPError> {
+        Ok(ListResourceTemplatesResult { resource_templates: vec![], next_cursor: None })
+    }
+
+    async fn subscribe(&self, uri: &str) -> Result<EmptyResult, MCPError> {
+        eprintln!("[INFO] Client subscribed to URI: {}", uri);
+        Ok(EmptyResult {})
+    }
+
+    async fn unsubscribe(&self, uri: &str) -> Result<EmptyResult, MCPError> {
+        eprintln!("[INFO] Client unsubscribed from URI: {}", uri);
+        Ok(EmptyResult {})
+    }
+
+    async fn set_log_level(&self, level: &str) -> Result<EmptyResult, MCPError> {
+        eprintln!("[INFO] Client requested log level: {}", level);
+        Ok(EmptyResult {})
+    }
+
+    async fn complete(&self, params: &Value) -> Result<CompleteResult, MCPError> {
+        eprintln!("[INFO] Received completion request with params: {:?}", params);
+        Ok(CompleteResult {
+            completion: CompletionList {
+                values: vec!["ls -la".to_string(), "echo 'hello'".to_string()],
+                has_more: Some(false),
+                total: Some(2),
+            }
+        })
+    }
+
+    async fn on_request_cancelled(&self, request_id: &str, reason: Option<&str>) {
+        eprintln!("[CANCEL] Request {} cancelled: {:?}", request_id, reason);
     }
 }
 
@@ -62,7 +162,7 @@ impl BashToolHandler {
     async fn execute_bash_command(
         &self,
         args: &Value,
-        _progress_sender: ProgressSender,
+        progress_sender: ProgressSender,
     ) -> Result<CallToolResult, MCPError> {
         let command = args.get("command").and_then(|v| v.as_str()).ok_or_else(|| {
             MCPError::MissingParameters("Missing required 'command' parameter".to_string())
@@ -71,20 +171,18 @@ impl BashToolHandler {
         let timeout_seconds = args.get("timeout").and_then(|v| v.as_u64()).unwrap_or(30);
 
         let mut cmd = Command::new("bash");
-        // FIX: Set kill_on_drop to true to automatically handle cleanup on timeout.
         cmd.kill_on_drop(true);
         cmd.arg("-c").arg(command).stdout(Stdio::piped()).stderr(Stdio::piped());
 
         let child = cmd.spawn().map_err(MCPError::IoError)?;
 
-        // Race the process completion against a timer.
+        progress_sender.send(0.1, Some("Command spawned".to_string()));
+
         let timeout = tokio::time::sleep(Duration::from_secs(timeout_seconds));
         tokio::pin!(timeout);
 
         tokio::select! {
-            // Bias select to poll the future first if both are ready.
             biased;
-
             result = child.wait_with_output() => {
                 let output = result.map_err(MCPError::IoError)?;
                 let stdout = String::from_utf8_lossy(&output.stdout).to_string();
@@ -100,6 +198,8 @@ impl BashToolHandler {
                     response_text.push_str(&stderr);
                 }
 
+                progress_sender.send(1.0, Some("Command finished".to_string()));
+
                 Ok(CallToolResult {
                     content: vec![ContentBlock::Text(TextContent { text: response_text, annotations: None })],
                     structured_content: None,
@@ -107,7 +207,6 @@ impl BashToolHandler {
                 })
             }
             _ = &mut timeout => {
-                // The timer finished first. kill_on_drop will handle the process.
                 let error_text = format!("Command timed out after {} seconds", timeout_seconds);
                 Ok(CallToolResult {
                     content: vec![ContentBlock::Text(TextContent { text: error_text, annotations: None })],
@@ -126,7 +225,6 @@ async fn main() {
     eprintln!("Bash MCP Server starting...");
     let mut stdin = tokio::io::stdin();
     let mut stdout = tokio::io::stdout();
-
     let mut reader = BufReader::new(&mut stdin);
 
     loop {

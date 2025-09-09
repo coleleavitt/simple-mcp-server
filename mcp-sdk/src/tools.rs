@@ -1,13 +1,12 @@
-//! Defines the data structures for the Model Context Protocol (MCP),
-//! aligned with the 2025-06-18 schema.
+// mcp-sdk/src/tools.rs
+
+#![allow(missing_docs)]
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
 
 // --- Core Metadata and Implementation Structs ---
-
-/// Describes the name and version of an MCP implementation.
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct Implementation {
@@ -17,22 +16,18 @@ pub struct Implementation {
     pub title: Option<String>,
 }
 
-/// Optional annotations for the client, used for display or context.
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct Annotations {
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub priority: Option<f64>, // Should be between 0.0 and 1.0
+    pub priority: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub last_modified: Option<String>, // ISO 8601 string
+    pub last_modified: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub audience: Option<Vec<String>>, // e.g., "user", "assistant"
+    pub audience: Option<Vec<String>>,
 }
 
 // --- Content Block Types ---
-
-/// Represents a block of content, which can be text, an image, audio, etc.
-/// Corresponds to the schema's `ContentBlock` definition.
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(tag = "type")]
 #[serde(rename_all = "snake_case")]
@@ -45,7 +40,6 @@ pub enum ContentBlock {
     EmbeddedResource(EmbeddedResource),
 }
 
-/// Text provided to or from an LLM.
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct TextContent {
     pub text: String,
@@ -53,49 +47,106 @@ pub struct TextContent {
     pub annotations: Option<Annotations>,
 }
 
-/// An image provided to or from an LLM.
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct ImageContent {
-    pub data: String, // base64-encoded
+    pub data: String,
     pub mime_type: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub annotations: Option<Annotations>,
 }
 
-/// Audio provided to or from an LLM.
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct AudioContent {
-    pub data: String, // base64-encoded
+    pub data: String,
     pub mime_type: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub annotations: Option<Annotations>,
 }
 
-// --- Resource and Tool Result Types ---
-
-/// The server's response to a tool call.
-/// Corresponds to the schema's `CallToolResult`.
-#[derive(Debug, Serialize, Clone)]
+// --- Result Types ---
+#[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct CallToolResult {
     pub content: Vec<ContentBlock>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub structured_content: Option<Value>,
-    #[serde(rename = "isError")]
-    #[serde(default)]
+    #[serde(rename = "isError", default)]
     pub is_error: bool,
 }
 
-/// The server's response to a resource read request.
-/// Corresponds to the schema's `ReadResourceResult`.
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ReadResourceResult {
     pub contents: Vec<ResourceContents>,
 }
 
-/// Represents the actual content of a resource, which can be text or binary.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ListToolsResult {
+    pub tools: Vec<Tool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ListResourcesResult {
+    pub resources: Vec<Resource>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ListPromptsResult {
+    pub prompts: Vec<Prompt>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct GetPromptResult {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    pub messages: Vec<PromptMessage>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct PromptMessage {
+    pub role: String,
+    pub content: ContentBlock,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct EmptyResult {}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct CompleteResult {
+    pub completion: CompletionList,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct CompletionList {
+    pub values: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub has_more: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total: Option<u32>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ListResourceTemplatesResult {
+    pub resource_templates: Vec<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
+}
+
+// --- Resource Content Types ---
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(untagged)]
 pub enum ResourceContents {
@@ -118,13 +169,11 @@ pub struct BlobResourceContents {
     pub uri: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mime_type: Option<String>,
-    pub blob: String, // base64-encoded
+    pub blob: String,
 }
 
-// --- Main Data Models (Tool, Resource, Prompt) ---
-
-/// One tool's metadata.
-#[derive(Debug, Serialize, Clone)]
+// --- Main Data Models ---
+#[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct Tool {
     pub name: String,
@@ -139,7 +188,6 @@ pub struct Tool {
     pub annotations: Option<ToolAnnotations>,
 }
 
-/// A known resource that the server is capable of reading.
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct Resource {
@@ -157,8 +205,6 @@ pub struct Resource {
     pub annotations: Option<Annotations>,
 }
 
-/// A link to a resource, included in a prompt or tool call result.
-/// Note its structural similarity to `Resource`.
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct ResourceLink {
@@ -176,7 +222,6 @@ pub struct ResourceLink {
     pub annotations: Option<Annotations>,
 }
 
-/// The contents of a resource, embedded into a prompt or tool call result.
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct EmbeddedResource {
     pub resource: ResourceContents,
@@ -184,7 +229,6 @@ pub struct EmbeddedResource {
     pub annotations: Option<Annotations>,
 }
 
-/// A prompt or prompt template that the server offers.
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct Prompt {
@@ -197,7 +241,6 @@ pub struct Prompt {
     pub arguments: Option<Vec<PromptArgument>>,
 }
 
-/// Describes an argument that a prompt can accept.
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct PromptArgument {
@@ -211,9 +254,7 @@ pub struct PromptArgument {
 }
 
 // --- Schema and Capabilities Structs ---
-
-/// Schema for a single tool's inputs or outputs.
-#[derive(Debug, Serialize, Clone, Default)]
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct ToolInputSchema {
     #[serde(rename = "type")]
@@ -224,8 +265,7 @@ pub struct ToolInputSchema {
     pub required: Vec<String>,
 }
 
-/// Additional hint properties describing a Tool to clients.
-#[derive(Debug, Serialize, Clone, Default)]
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct ToolAnnotations {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -234,8 +274,7 @@ pub struct ToolAnnotations {
     pub idempotent_hint: Option<bool>,
 }
 
-/// Response to the `initialize` request.
-#[derive(Debug, Serialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct InitializeResponse {
     pub protocol_version: String,
@@ -243,8 +282,7 @@ pub struct InitializeResponse {
     pub capabilities: ServerCapabilities,
 }
 
-/// Capabilities that a server may support.
-#[derive(Debug, Serialize, Clone, Default)]
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct ServerCapabilities {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -257,24 +295,4 @@ pub struct ServerCapabilities {
     pub completions: Option<serde_json::Map<String, Value>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub logging: Option<serde_json::Map<String, Value>>,
-}
-
-
-// --- Legacy Structs (Kept for compatibility if needed, but should be phased out) ---
-// These are simplified versions that your old code used.
-// The new structs above should be preferred.
-
-#[derive(Debug, Serialize, Clone)]
-pub struct LegacyServerInfo {
-    pub name: String,
-    pub version: String,
-}
-
-#[derive(Debug, Serialize, Clone)]
-pub struct LegacyToolProperty {
-    #[serde(rename = "type")]
-    pub property_type: String,
-    pub description: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub default: Option<Value>,
 }
