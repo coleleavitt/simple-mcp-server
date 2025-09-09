@@ -1,314 +1,280 @@
-use serde::Serialize;
+//! Defines the data structures for the Model Context Protocol (MCP),
+//! aligned with the 2025-06-18 schema.
+
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
 
-/// One chunk of tool output
-#[derive(Debug, Serialize, Clone)]
-pub struct ToolContent {
-    #[serde(rename = "type")]
-    pub content_type: String,
-    pub text: String,
+// --- Core Metadata and Implementation Structs ---
+
+/// Describes the name and version of an MCP implementation.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct Implementation {
+    pub name: String,
+    pub version: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
 }
 
-/// Full tool response
+/// Optional annotations for the client, used for display or context.
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct Annotations {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub priority: Option<f64>, // Should be between 0.0 and 1.0
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_modified: Option<String>, // ISO 8601 string
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub audience: Option<Vec<String>>, // e.g., "user", "assistant"
+}
+
+// --- Content Block Types ---
+
+/// Represents a block of content, which can be text, an image, audio, etc.
+/// Corresponds to the schema's `ContentBlock` definition.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(tag = "type")]
+#[serde(rename_all = "snake_case")]
+pub enum ContentBlock {
+    Text(TextContent),
+    Image(ImageContent),
+    Audio(AudioContent),
+    ResourceLink(ResourceLink),
+    #[serde(rename = "resource")]
+    EmbeddedResource(EmbeddedResource),
+}
+
+/// Text provided to or from an LLM.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct TextContent {
+    pub text: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub annotations: Option<Annotations>,
+}
+
+/// An image provided to or from an LLM.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ImageContent {
+    pub data: String, // base64-encoded
+    pub mime_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub annotations: Option<Annotations>,
+}
+
+/// Audio provided to or from an LLM.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct AudioContent {
+    pub data: String, // base64-encoded
+    pub mime_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub annotations: Option<Annotations>,
+}
+
+// --- Resource and Tool Result Types ---
+
+/// The server's response to a tool call.
+/// Corresponds to the schema's `CallToolResult`.
 #[derive(Debug, Serialize, Clone)]
-pub struct ToolResponse {
-    pub content: Vec<ToolContent>,
+#[serde(rename_all = "camelCase")]
+pub struct CallToolResult {
+    pub content: Vec<ContentBlock>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub structured_content: Option<Value>,
     #[serde(rename = "isError")]
+    #[serde(default)]
     pub is_error: bool,
 }
 
-impl ToolResponse {
-    pub fn new(text: String, is_error: bool) -> Self {
-        ToolResponse {
-            content: vec![ToolContent { content_type: "text".into(), text }],
-            is_error,
-        }
-    }
+/// The server's response to a resource read request.
+/// Corresponds to the schema's `ReadResourceResult`.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct ReadResourceResult {
+    pub contents: Vec<ResourceContents>,
 }
 
-/// Progress notification for long-running operations
-#[derive(Debug, Serialize, Clone)]
-pub struct ProgressNotification {
-    #[serde(rename = "requestId")]
-    pub request_id: String,
-    pub progress: f64, // 0.0 to 1.0
+/// Represents the actual content of a resource, which can be text or binary.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(untagged)]
+pub enum ResourceContents {
+    Text(TextResourceContents),
+    Blob(BlobResourceContents),
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct TextResourceContents {
+    pub uri: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub message: Option<String>,
-}
-
-/// Cancellation notification
-#[derive(Debug, Serialize, Clone)]
-pub struct CancellationNotification {
-    #[serde(rename = "requestId")]
-    pub request_id: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub reason: Option<String>,
-}
-
-/// JSON-RPC progress notification message (MCP protocol compliant)
-#[derive(Debug, Serialize, Clone)]
-pub struct ProgressNotificationMessage {
-    pub jsonrpc: String,
-    pub method: String,
-    pub params: ProgressParams,
-}
-
-/// Parameters for progress notifications
-#[derive(Debug, Serialize, Clone)]
-pub struct ProgressParams {
-    #[serde(rename = "requestId")]
-    pub request_id: String,
-    pub progress: f64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub message: Option<String>,
-}
-
-impl ProgressNotificationMessage {
-    /// Create a new progress notification message
-    pub fn new(request_id: String, progress: f64, message: Option<String>) -> Self {
-        Self {
-            jsonrpc: "2.0".into(),
-            method: "notifications/progress".into(),
-            params: ProgressParams {
-                request_id,
-                progress,
-                message,
-            },
-        }
-    }
-}
-
-/// JSON-RPC cancellation notification message (MCP protocol compliant)
-#[derive(Debug, Serialize, Clone)]
-pub struct CancellationNotificationMessage {
-    pub jsonrpc: String,
-    pub method: String,
-    pub params: CancellationParams,
-}
-
-/// Parameters for cancellation notifications
-#[derive(Debug, Serialize, Clone)]
-pub struct CancellationParams {
-    #[serde(rename = "requestId")]
-    pub request_id: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub reason: Option<String>,
-}
-
-impl CancellationNotificationMessage {
-    /// Create a new cancellation notification message
-    pub fn new(request_id: String, reason: Option<String>) -> Self {
-        Self {
-            jsonrpc: "2.0".into(),
-            method: "notifications/cancelled".into(),
-            params: CancellationParams {
-                request_id,
-                reason,
-            },
-        }
-    }
-}
-
-/// Prompt definition with parameters
-#[derive(Debug, Serialize, Clone)]
-pub struct Prompt {
-    pub name: String,
-    pub description: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub arguments: Option<Vec<PromptArgument>>,
-}
-
-/// Prompt argument definition
-#[derive(Debug, Serialize, Clone)]
-pub struct PromptArgument {
-    pub name: String,
-    pub description: String,
-    pub required: bool,
-}
-
-/// Prompt response with messages
-#[derive(Debug, Serialize, Clone)]
-pub struct PromptResponse {
-    pub description: String,
-    pub messages: Vec<PromptMessage>,
-}
-
-/// Individual prompt message
-#[derive(Debug, Serialize, Clone)]
-pub struct PromptMessage {
-    pub role: String, // "user", "assistant", "system"
-    pub content: PromptContent,
-}
-
-/// Prompt message content
-#[derive(Debug, Serialize, Clone)]
-pub struct PromptContent {
-    #[serde(rename = "type")]
-    pub content_type: String, // "text"
+    pub mime_type: Option<String>,
     pub text: String,
 }
 
-/// Resource definition
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct BlobResourceContents {
+    pub uri: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mime_type: Option<String>,
+    pub blob: String, // base64-encoded
+}
+
+// --- Main Data Models (Tool, Resource, Prompt) ---
+
+/// One tool's metadata.
 #[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct Tool {
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    pub input_schema: ToolInputSchema,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output_schema: Option<ToolInputSchema>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub annotations: Option<ToolAnnotations>,
+}
+
+/// A known resource that the server is capable of reading.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
 pub struct Resource {
     pub uri: String,
     pub name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
-    #[serde(rename = "mimeType", skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub mime_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub size: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub annotations: Option<Annotations>,
 }
 
-/// Resource content response
-#[derive(Debug, Serialize, Clone)]
-pub struct ResourceContent {
+/// A link to a resource, included in a prompt or tool call result.
+/// Note its structural similarity to `Resource`.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ResourceLink {
     pub uri: String,
-    #[serde(rename = "mimeType")]
-    pub mime_type: String,
-    pub text: String,
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mime_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub size: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub annotations: Option<Annotations>,
 }
 
-/// Streaming chunk for long operations
-#[derive(Debug, Serialize, Clone)]
-pub struct StreamChunk {
-    pub chunk_type: String, // "progress", "data", "complete", "error"
-    pub data: Value,
+/// The contents of a resource, embedded into a prompt or tool call result.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct EmbeddedResource {
+    pub resource: ResourceContents,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub annotations: Option<Annotations>,
 }
 
-/// Server capabilities object
-#[derive(Debug, Serialize, Clone)]
-pub struct ServerCapabilities {
-    pub tools: serde_json::Map<String, Value>,
-    pub prompts: serde_json::Map<String, Value>,
-    pub resources: serde_json::Map<String, Value>,
+/// A prompt or prompt template that the server offers.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct Prompt {
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub arguments: Option<Vec<PromptArgument>>,
 }
 
-/// Response to initialize()
+/// Describes an argument that a prompt can accept.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct PromptArgument {
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub required: bool,
+}
+
+// --- Schema and Capabilities Structs ---
+
+/// Schema for a single tool's inputs or outputs.
+#[derive(Debug, Serialize, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolInputSchema {
+    #[serde(rename = "type")]
+    pub schema_type: String,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub properties: HashMap<String, Value>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub required: Vec<String>,
+}
+
+/// Additional hint properties describing a Tool to clients.
+#[derive(Debug, Serialize, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolAnnotations {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub read_only_hint: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub idempotent_hint: Option<bool>,
+}
+
+/// Response to the `initialize` request.
 #[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
 pub struct InitializeResponse {
-    #[serde(rename = "protocolVersion")]
     pub protocol_version: String,
+    pub server_info: Implementation,
     pub capabilities: ServerCapabilities,
-    #[serde(rename = "serverInfo")]
-    pub server_info: ServerInfo,
 }
 
-/// Static server info
+/// Capabilities that a server may support.
+#[derive(Debug, Serialize, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ServerCapabilities {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tools: Option<serde_json::Map<String, Value>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prompts: Option<serde_json::Map<String, Value>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resources: Option<serde_json::Map<String, Value>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub completions: Option<serde_json::Map<String, Value>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub logging: Option<serde_json::Map<String, Value>>,
+}
+
+
+// --- Legacy Structs (Kept for compatibility if needed, but should be phased out) ---
+// These are simplified versions that your old code used.
+// The new structs above should be preferred.
+
 #[derive(Debug, Serialize, Clone)]
-pub struct ServerInfo {
+pub struct LegacyServerInfo {
     pub name: String,
     pub version: String,
 }
 
-/// Schema for a single tool's inputs
 #[derive(Debug, Serialize, Clone)]
-pub struct ToolInputSchema {
-    #[serde(rename = "type")]
-    pub schema_type: String,
-    pub properties: HashMap<String, ToolProperty>,
-    pub required: Vec<String>,
-}
-
-/// One property in a tool's input schema
-#[derive(Debug, Serialize, Clone)]
-pub struct ToolProperty {
+pub struct LegacyToolProperty {
     #[serde(rename = "type")]
     pub property_type: String,
     pub description: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub items: Option<ToolPropertyItems>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub default: Option<Value>,
-}
-
-/// When `ToolProperty` is an array
-#[derive(Debug, Serialize, Clone)]
-pub struct ToolPropertyItems {
-    #[serde(rename = "type")]
-    pub item_type: String,
-}
-
-/// One tool's metadata
-#[derive(Debug, Serialize, Clone)]
-pub struct Tool {
-    pub name: String,
-    pub description: String,
-    #[serde(rename = "inputSchema")]
-    pub input_schema: ToolInputSchema,
-}
-
-impl ToolProperty {
-    pub fn string(description: impl Into<String>) -> Self {
-        ToolProperty {
-            property_type: "string".into(),
-            description: description.into(),
-            items: None,
-            default: None,
-        }
-    }
-
-    pub fn array(description: impl Into<String>, item_type: impl Into<String>) -> Self {
-        ToolProperty {
-            property_type: "array".into(),
-            description: description.into(),
-            items: Some(ToolPropertyItems { item_type: item_type.into() }),
-            default: None,
-        }
-    }
-
-    pub fn boolean(description: impl Into<String>, default: bool) -> Self {
-        ToolProperty {
-            property_type: "boolean".into(),
-            description: description.into(),
-            items: None,
-            default: Some(Value::Bool(default)),
-        }
-    }
-}
-
-impl Prompt {
-    pub fn new(name: impl Into<String>, description: impl Into<String>) -> Self {
-        Prompt {
-            name: name.into(),
-            description: description.into(),
-            arguments: None,
-        }
-    }
-
-    pub fn with_arguments(mut self, args: Vec<PromptArgument>) -> Self {
-        self.arguments = Some(args);
-        self
-    }
-}
-
-impl PromptArgument {
-    pub fn new(name: impl Into<String>, description: impl Into<String>, required: bool) -> Self {
-        PromptArgument {
-            name: name.into(),
-            description: description.into(),
-            required,
-        }
-    }
-}
-
-impl Resource {
-    pub fn new(uri: impl Into<String>, name: impl Into<String>) -> Self {
-        Resource {
-            uri: uri.into(),
-            name: name.into(),
-            description: None,
-            mime_type: None,
-        }
-    }
-
-    pub fn with_description(mut self, description: impl Into<String>) -> Self {
-        self.description = Some(description.into());
-        self
-    }
-
-    pub fn with_mime_type(mut self, mime_type: impl Into<String>) -> Self {
-        self.mime_type = Some(mime_type.into());
-        self
-    }
 }
