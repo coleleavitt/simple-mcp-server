@@ -15,14 +15,11 @@ use async_trait::async_trait;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use tokio::sync::{RwLock, mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, RwLock};
 
 #[async_trait]
 pub trait ToolHandler: Send + Sync {
-    async fn initialize(
-        &self,
-        capabilities: ServerCapabilities,
-    ) -> Result<InitializeResponse, MCPError>;
+    async fn initialize(&self, capabilities: ServerCapabilities) -> Result<InitializeResponse, MCPError>;
     async fn list_tools(&self, cursor: Option<String>) -> Result<ListToolsResult, MCPError>;
     async fn call_tool(
         &self,
@@ -30,8 +27,7 @@ pub trait ToolHandler: Send + Sync {
         args: &Value,
         progress_sender: ProgressSender,
     ) -> Result<CallToolResult, MCPError>;
-    async fn list_resources(&self, cursor: Option<String>)
-    -> Result<ListResourcesResult, MCPError>;
+    async fn list_resources(&self, cursor: Option<String>) -> Result<ListResourcesResult, MCPError>;
     async fn read_resource(&self, uri: &str) -> Result<ReadResourceResult, MCPError>;
     async fn list_prompts(&self, cursor: Option<String>) -> Result<ListPromptsResult, MCPError>;
     async fn get_prompt(&self, name: &str, args: &Value) -> Result<GetPromptResult, MCPError>;
@@ -133,146 +129,71 @@ impl<H: ToolHandler> SystemMCPServer<H> {
         }
 
         let request_id = req.id.clone();
+
+        // FIX: Each match arm now uses an `async` block. This allows the `?` operator
+        // to work correctly within the block, as its return type is `Result`.
+        // The entire match expression is then awaited.
         let result: Result<Value, MCPError> = match req.method.as_str() {
-            "initialize" => {
-                async {
-                    self.handler
-                        .initialize(self.capabilities.clone())
-                        .await
-                        .and_then(|resp| serde_json::to_value(resp).map_err(MCPError::from))
-                }
-                .await
-            }
-            "ping" => {
-                async {
-                    self.handler
-                        .ping()
-                        .await
-                        .and_then(|resp| serde_json::to_value(resp).map_err(MCPError::from))
-                }
-                .await
-            }
-            "tools/list" => {
-                async {
-                    let params = req.params.as_ref();
-                    let cursor = params
-                        .and_then(|p| p.get("cursor"))
-                        .and_then(|v| v.as_str())
-                        .map(String::from);
-                    self.handler
-                        .list_tools(cursor)
-                        .await
-                        .and_then(|resp| serde_json::to_value(resp).map_err(MCPError::from))
-                }
-                .await
-            }
+            "initialize" => async {
+                self.handler.initialize(self.capabilities.clone()).await
+                    .and_then(|resp| serde_json::to_value(resp).map_err(MCPError::from))
+            }.await,
+            "ping" => async {
+                self.handler.ping().await
+                    .and_then(|resp| serde_json::to_value(resp).map_err(MCPError::from))
+            }.await,
+            "tools/list" => async {
+                let params = req.params.as_ref();
+                let cursor = params.and_then(|p| p.get("cursor")).and_then(|v| v.as_str()).map(String::from);
+                self.handler.list_tools(cursor).await
+                    .and_then(|resp| serde_json::to_value(resp).map_err(MCPError::from))
+            }.await,
             "tools/call" => self.handle_tool_call_with_cancellation(&req).await,
-            "resources/list" => {
-                async {
-                    let params = req.params.as_ref();
-                    let cursor = params
-                        .and_then(|p| p.get("cursor"))
-                        .and_then(|v| v.as_str())
-                        .map(String::from);
-                    self.handler
-                        .list_resources(cursor)
-                        .await
-                        .and_then(|resp| serde_json::to_value(resp).map_err(MCPError::from))
-                }
-                .await
-            }
+            "resources/list" => async {
+                let params = req.params.as_ref();
+                let cursor = params.and_then(|p| p.get("cursor")).and_then(|v| v.as_str()).map(String::from);
+                self.handler.list_resources(cursor).await
+                    .and_then(|resp| serde_json::to_value(resp).map_err(MCPError::from))
+            }.await,
             "resources/read" => self.handle_resource_read(&req).await,
-            "resources/templates/list" => {
-                async {
-                    let params = req.params.as_ref();
-                    let cursor = params
-                        .and_then(|p| p.get("cursor"))
-                        .and_then(|v| v.as_str())
-                        .map(String::from);
-                    self.handler
-                        .list_resource_templates(cursor)
-                        .await
-                        .and_then(|resp| serde_json::to_value(resp).map_err(MCPError::from))
-                }
-                .await
-            }
-            "resources/subscribe" => {
-                async {
-                    let params = req
-                        .params
-                        .as_ref()
-                        .ok_or_else(|| MCPError::MissingParameters("params object".into()))?;
-                    let uri = params
-                        .get("uri")
-                        .and_then(Value::as_str)
-                        .ok_or_else(|| MCPError::MissingParameters("uri".into()))?;
-                    let res = self.handler.subscribe(uri).await?;
-                    self.subscriptions.write().await.insert(uri.to_string());
-                    serde_json::to_value(res).map_err(MCPError::from)
-                }
-                .await
-            }
-            "resources/unsubscribe" => {
-                async {
-                    let params = req
-                        .params
-                        .as_ref()
-                        .ok_or_else(|| MCPError::MissingParameters("params object".into()))?;
-                    let uri = params
-                        .get("uri")
-                        .and_then(Value::as_str)
-                        .ok_or_else(|| MCPError::MissingParameters("uri".into()))?;
-                    let res = self.handler.unsubscribe(uri).await?;
-                    self.subscriptions.write().await.remove(uri);
-                    serde_json::to_value(res).map_err(MCPError::from)
-                }
-                .await
-            }
-            "prompts/list" => {
-                async {
-                    let params = req.params.as_ref();
-                    let cursor = params
-                        .and_then(|p| p.get("cursor"))
-                        .and_then(|v| v.as_str())
-                        .map(String::from);
-                    self.handler
-                        .list_prompts(cursor)
-                        .await
-                        .and_then(|resp| serde_json::to_value(resp).map_err(MCPError::from))
-                }
-                .await
-            }
+            "resources/templates/list" => async {
+                let params = req.params.as_ref();
+                let cursor = params.and_then(|p| p.get("cursor")).and_then(|v| v.as_str()).map(String::from);
+                self.handler.list_resource_templates(cursor).await
+                    .and_then(|resp| serde_json::to_value(resp).map_err(MCPError::from))
+            }.await,
+            "resources/subscribe" => async {
+                let params = req.params.as_ref().ok_or_else(|| MCPError::MissingParameters("params object".into()))?;
+                let uri = params.get("uri").and_then(Value::as_str).ok_or_else(|| MCPError::MissingParameters("uri".into()))?;
+                let res = self.handler.subscribe(uri).await?;
+                self.subscriptions.write().await.insert(uri.to_string());
+                serde_json::to_value(res).map_err(MCPError::from)
+            }.await,
+            "resources/unsubscribe" => async {
+                let params = req.params.as_ref().ok_or_else(|| MCPError::MissingParameters("params object".into()))?;
+                let uri = params.get("uri").and_then(Value::as_str).ok_or_else(|| MCPError::MissingParameters("uri".into()))?;
+                let res = self.handler.unsubscribe(uri).await?;
+                self.subscriptions.write().await.remove(uri);
+                serde_json::to_value(res).map_err(MCPError::from)
+            }.await,
+            "prompts/list" => async {
+                let params = req.params.as_ref();
+                let cursor = params.and_then(|p| p.get("cursor")).and_then(|v| v.as_str()).map(String::from);
+                self.handler.list_prompts(cursor).await
+                    .and_then(|resp| serde_json::to_value(resp).map_err(MCPError::from))
+            }.await,
             "prompts/get" => self.handle_prompt_get(&req).await,
-            "logging/setLevel" => {
-                async {
-                    let params = req
-                        .params
-                        .as_ref()
-                        .ok_or_else(|| MCPError::MissingParameters("params object".into()))?;
-                    let level = params
-                        .get("level")
-                        .and_then(Value::as_str)
-                        .ok_or_else(|| MCPError::MissingParameters("level".into()))?;
-                    self.handler
-                        .set_log_level(level)
-                        .await
-                        .and_then(|resp| serde_json::to_value(resp).map_err(MCPError::from))
-                }
-                .await
-            }
-            "completion/complete" => {
-                async {
-                    let params = req
-                        .params
-                        .as_ref()
-                        .ok_or_else(|| MCPError::MissingParameters("params object".into()))?;
-                    self.handler
-                        .complete(params)
-                        .await
-                        .and_then(|resp| serde_json::to_value(resp).map_err(MCPError::from))
-                }
-                .await
-            }
+            "logging/setLevel" => async {
+                let params = req.params.as_ref().ok_or_else(|| MCPError::MissingParameters("params object".into()))?;
+                let level = params.get("level").and_then(Value::as_str).ok_or_else(|| MCPError::MissingParameters("level".into()))?;
+                self.handler.set_log_level(level).await
+                    .and_then(|resp| serde_json::to_value(resp).map_err(MCPError::from))
+            }.await,
+            "completion/complete" => async {
+                let params = req.params.as_ref().ok_or_else(|| MCPError::MissingParameters("params object".into()))?;
+                self.handler.complete(params).await
+                    .and_then(|resp| serde_json::to_value(resp).map_err(MCPError::from))
+            }.await,
             other => Err(MCPError::MethodNotFound(other.into())),
         };
 
