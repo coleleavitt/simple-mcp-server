@@ -3,6 +3,26 @@ name = "mcp-sdk"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+default = ["claude-4", "jsonrpc-2", "schema-draft"]
+
+# JSON-RPC version support
+jsonrpc-1 = []
+jsonrpc-2 = []
+
+# Claude model version support
+claude-3-5 = ["jsonrpc-1", "schema-june-2025"]
+claude-3-7 = ["jsonrpc-1", "schema-june-2025"] 
+claude-4 = ["jsonrpc-2", "schema-draft"]
+
+# Schema versions
+schema-june-2025 = []  # 2025-06-18 schema
+schema-draft = []      # Draft schema with strict JSON-RPC 2.0
+
+# Legacy support
+legacy = ["jsonrpc-1", "schema-june-2025"]
+strict = ["jsonrpc-2", "schema-draft"]
+
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"

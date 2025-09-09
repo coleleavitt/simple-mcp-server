@@ -141,11 +141,27 @@ impl<H: ToolHandler> SystemMCPServer<H> {
         self.notification_rx.take()
     }
 
-    fn detect_version(&self, req: &MCPRequest) -> JsonRpcVersion {
-        match req.jsonrpc.as_deref() {
-            Some("2.0") => JsonRpcVersion::V2_0,
-            Some("1.0") | None => JsonRpcVersion::V1_0,
-            Some(_) => JsonRpcVersion::V2_0,
+    fn validate_and_detect_version(&self, req: &MCPRequest) -> Result<JsonRpcVersion, MCPError> {
+        #[cfg(all(feature = "schema-draft", not(feature = "schema-june-2025")))]
+        {
+            // Strict mode: only allow 2.0, and require id for requests
+            if req.jsonrpc_version() != Some("2.0") {
+                return Err(MCPError::InvalidJsonRpcVersion(
+                    req.jsonrpc_version().unwrap_or("missing").to_string()
+                ));
+            }
+            // In draft schema, all messages must have id (even notifications in some cases)
+            // But we still allow None for notifications for practical compatibility
+            Ok(JsonRpcVersion::V2_0)
+        }
+        #[cfg(feature = "schema-june-2025")]
+        {
+            // Flexible mode: support both 1.0 and 2.0
+            match req.jsonrpc_version() {
+                Some("2.0") => Ok(JsonRpcVersion::V2_0),
+                Some("1.0") | None => Ok(JsonRpcVersion::V1_0),
+                Some(other) => Err(MCPError::InvalidJsonRpcVersion(other.to_string())),
+            }
         }
     }
 
@@ -162,10 +178,16 @@ impl<H: ToolHandler> SystemMCPServer<H> {
     }
 
     pub async fn handle(&self, req: MCPRequest) -> Option<MCPResponse> {
-        let version = self.detect_version(&req);
+        // Validate and detect JSON-RPC version
+        let version = match self.validate_and_detect_version(&req) {
+            Ok(version) => version,
+            Err(err) => {
+                return Some(self.create_error_response(JsonRpcVersion::V2_0, req.id.clone(), err));
+            }
+        };
 
         // Handle notifications (no response)
-        if req.id.is_none() {
+        if req.is_notification() {
             return match req.method.as_str() {
                 "notifications/cancelled" => {
                     self.handle_cancellation(&req).await;
@@ -199,45 +221,63 @@ impl<H: ToolHandler> SystemMCPServer<H> {
             other => Err(MCPError::MethodNotFound(other.into())),
         };
 
-        Some(self.build_response(version, req.id.clone(), result))
+        match result {
+            Ok(res) => Some(self.create_success_response(version, req.id.clone(), res)),
+            Err(err) => Some(self.create_error_response(version, req.id.clone(), err)),
+        }
     }
 
-    fn build_response(&self, version: JsonRpcVersion, id: Option<Value>, result: Result<Value, MCPError>) -> MCPResponse {
+    fn create_success_response(&self, version: JsonRpcVersion, id: Option<Value>, result: Value) -> MCPResponse {
         match version {
             JsonRpcVersion::V1_0 => {
-                match result {
-                    Ok(res) => MCPResponse {
-                        jsonrpc: None,
-                        id,
-                        result: Some(res),
-                        error: None,
-                    },
-                    Err(err) => MCPResponse {
-                        jsonrpc: None,
-                        id,
-                        result: Some(Value::Null),
-                        error: Some(err.to_json_rpc_error()),
-                    },
+                #[cfg(feature = "jsonrpc-1")]
+                {
+                    MCPResponse::v1_success(id, result)
+                }
+                #[cfg(not(feature = "jsonrpc-1"))]
+                {
+                    MCPResponse::success(id, result)
                 }
             }
             JsonRpcVersion::V2_0 => {
-                match result {
-                    Ok(res) => MCPResponse {
-                        jsonrpc: Some("2.0".into()),
-                        id,
-                        result: Some(res),
-                        error: None,
-                    },
-                    Err(err) => MCPResponse {
-                        jsonrpc: Some("2.0".into()),
-                        id,
-                        result: None,
-                        error: Some(err.to_json_rpc_error()),
-                    },
+                #[cfg(feature = "jsonrpc-2")]
+                {
+                    MCPResponse::v2_success(id, result)
+                }
+                #[cfg(not(feature = "jsonrpc-2"))]
+                {
+                    MCPResponse::success(id, result)
                 }
             }
         }
     }
+
+    fn create_error_response(&self, version: JsonRpcVersion, id: Option<Value>, error: MCPError) -> MCPResponse {
+        let json_rpc_error = error.to_json_rpc_error();
+        match version {
+            JsonRpcVersion::V1_0 => {
+                #[cfg(feature = "jsonrpc-1")]
+                {
+                    MCPResponse::v1_error(id, json_rpc_error)
+                }
+                #[cfg(not(feature = "jsonrpc-1"))]
+                {
+                    MCPResponse::error(id, json_rpc_error)
+                }
+            }
+            JsonRpcVersion::V2_0 => {
+                #[cfg(feature = "jsonrpc-2")]
+                {
+                    MCPResponse::v2_error(id, json_rpc_error)
+                }
+                #[cfg(not(feature = "jsonrpc-2"))]
+                {
+                    MCPResponse::error(id, json_rpc_error)
+                }
+            }
+        }
+    }
+
 
     async fn handle_cancellation(&self, req: &MCPRequest) {
         if let Some(params) = &req.params {

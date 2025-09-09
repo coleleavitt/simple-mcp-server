@@ -1,582 +1,239 @@
 use async_trait::async_trait;
-use mcp_sdk::{
-    MCPError, MCPRequest, MCPResponse, ProgressSender, ServerBuilder, ServerNotification,
-    ToolHandler, tool_dispatch,
-    tools::{
-        ProgressNotificationMessage, Prompt, PromptArgument, PromptContent, PromptMessage,
-        PromptResponse, Resource, ResourceContent, Tool, ToolInputSchema, ToolProperty,
-        ToolResponse,
-    },
-};
+use mcp_sdk::error::MCPError;
+use mcp_sdk::notifications::ProgressSender;
+use mcp_sdk::request::MCPRequest;
+use mcp_sdk::server::{SystemMCPServer, ToolHandler};
+use mcp_sdk::tools::{Tool, ToolInputSchema, ToolProperty, ToolResponse};
 use serde_json::Value;
-use std::io::{self, BufRead, Write};
+use std::collections::HashMap;
+use std::process::Stdio;
+use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
-use tokio::time::{Duration, timeout};
 
-const MAX_REQUEST_SIZE: usize = 1024 * 1024;
-const MAX_COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
-const MAX_OUTPUT_SIZE: usize = 1024 * 1024;
-
-struct MyToolHandler;
+struct BashToolHandler;
 
 #[async_trait]
-impl ToolHandler for MyToolHandler {
+impl ToolHandler for BashToolHandler {
     async fn call_tool(
         &self,
         name: &str,
         args: &Value,
         progress_sender: ProgressSender,
     ) -> Result<ToolResponse, MCPError> {
-        tool_dispatch!(self, name, args, progress_sender, {
-            "run_command" => handle_run_command,
-            "list_directory" => handle_list_directory,
-            "read_file" => handle_read_file,
-            "get_system_info" => handle_get_system_info,
-            "long_running_task" => handle_long_running_task,
-        })
-    }
-
-    async fn list_prompts(&self) -> Result<Vec<Prompt>, MCPError> {
-        Ok(vec![
-            Prompt::new("system_analysis", "Analyze system performance and health").with_arguments(
-                vec![
-                    PromptArgument::new("component", "System component to analyze", false),
-                    PromptArgument::new("depth", "Analysis depth level", false),
-                ],
-            ),
-            Prompt::new("command_generator", "Generate safe system commands").with_arguments(vec![
-                PromptArgument::new("task", "Task description", true),
-                PromptArgument::new("safety_level", "Safety level (high/medium/low)", false),
-            ]),
-        ])
-    }
-
-    async fn get_prompt(&self, name: &str, args: &Value) -> Result<PromptResponse, MCPError> {
         match name {
-            "system_analysis" => {
-                let component = args
-                    .get("component")
-                    .and_then(Value::as_str)
-                    .unwrap_or("overall");
-                Ok(PromptResponse {
-                    description: format!("System analysis prompt for {}", component),
-                    messages: vec![PromptMessage {
-                        role: "user".into(),
-                        content: PromptContent {
-                            content_type: "text".into(),
-                            text: format!(
-                                "Please analyze the {} system component. Provide detailed insights on performance, health, and recommendations.",
-                                component
-                            ),
-                        },
-                    }],
-                })
-            }
-            "command_generator" => {
-                let task = args
-                    .get("task")
-                    .and_then(Value::as_str)
-                    .ok_or(MCPError::MissingParameters)?;
-                Ok(PromptResponse {
-                    description: "Command generation prompt".into(),
-                    messages: vec![
-                        PromptMessage {
-                            role: "system".into(),
-                            content: PromptContent {
-                                content_type: "text".into(),
-                                text: "You are a system administrator assistant. Generate safe, well-documented commands.".into(),
-                            },
-                        },
-                        PromptMessage {
-                            role: "user".into(),
-                            content: PromptContent {
-                                content_type: "text".into(),
-                                text: format!("Generate commands to accomplish this task safely: {}", task),
-                            },
-                        }
-                    ],
-                })
-            }
-            _ => Err(MCPError::UnknownPrompt(name.into())),
+            "bash" => self.execute_bash_command(args, progress_sender).await,
+            _ => Err(MCPError::UnknownTool(name.to_string())),
         }
-    }
-
-    async fn list_resources(&self) -> Result<Vec<Resource>, MCPError> {
-        Ok(vec![
-            Resource::new("file:///etc/os-release", "OS Information")
-                .with_description("Operating system release information")
-                .with_mime_type("text/plain"),
-            Resource::new("file:///proc/meminfo", "Memory Information")
-                .with_description("System memory usage details")
-                .with_mime_type("text/plain"),
-            Resource::new("internal://system-status", "System Status")
-                .with_description("Live system status dashboard")
-                .with_mime_type("application/json"),
-        ])
-    }
-
-    async fn read_resource(&self, uri: &str) -> Result<ResourceContent, MCPError> {
-        match uri {
-            "file:///etc/os-release" => {
-                let content = tokio::fs::read_to_string("/etc/os-release")
-                    .await
-                    .map_err(MCPError::IoError)?;
-                Ok(ResourceContent {
-                    uri: uri.into(),
-                    mime_type: "text/plain".into(),
-                    text: content,
-                })
-            }
-            "file:///proc/meminfo" => {
-                let content = tokio::fs::read_to_string("/proc/meminfo")
-                    .await
-                    .map_err(MCPError::IoError)?;
-                Ok(ResourceContent {
-                    uri: uri.into(),
-                    mime_type: "text/plain".into(),
-                    text: content,
-                })
-            }
-            "internal://system-status" => {
-                let status = serde_json::json!({
-                    "timestamp": chrono::Utc::now(),
-                    "uptime": "system uptime info",
-                    "load": "load averages",
-                    "memory": "memory usage",
-                    "disk": "disk usage"
-                });
-                Ok(ResourceContent {
-                    uri: uri.into(),
-                    mime_type: "application/json".into(),
-                    text: status.to_string(),
-                })
-            }
-            _ => Err(MCPError::ResourceNotFound(uri.into())),
-        }
-    }
-
-    async fn on_tool_called(&self, name: &str) {
-        eprintln!("[TOOL] Executing: {}", name);
-    }
-
-    async fn on_tool_completed(&self, name: &str, success: bool) {
-        let status = if success { "SUCCESS" } else { "FAILED" };
-        eprintln!("[TOOL] Completed: {} - {}", name, status);
-    }
-
-    async fn on_request_cancelled(&self, request_id: &str, reason: Option<&str>) {
-        eprintln!("[CANCEL] Request {} cancelled: {:?}", request_id, reason);
     }
 }
 
-impl MyToolHandler {
-    fn extract_string_param(&self, args: &Value, key: &str) -> Result<String, MCPError> {
-        args.get(key)
-            .and_then(Value::as_str)
-            .map(|s| s.to_string())
-            .ok_or(MCPError::MissingParameters)
-    }
-
-    fn extract_optional_string(&self, args: &Value, key: &str, default: &str) -> String {
-        args.get(key)
-            .and_then(Value::as_str)
-            .map(|s| s.to_string())
-            .unwrap_or_else(|| default.to_string())
-    }
-
-    fn extract_optional_bool(&self, args: &Value, key: &str, default: bool) -> bool {
-        args.get(key).and_then(Value::as_bool).unwrap_or(default)
-    }
-
-    fn extract_string_array(&self, args: &Value, key: &str) -> Vec<String> {
-        args.get(key)
-            .and_then(Value::as_array)
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(Value::as_str)
-                    .map(String::from)
-                    .collect()
-            })
-            .unwrap_or_default()
-    }
-
-    async fn handle_run_command(
+impl BashToolHandler {
+    async fn execute_bash_command(
         &self,
         args: &Value,
         progress_sender: ProgressSender,
     ) -> Result<ToolResponse, MCPError> {
-        let command = self.extract_string_param(args, "command")?;
-        let argv = self.extract_string_array(args, "args");
-        let _token = self.extract_string_param(args, "token")?; // Validate token but don't use
+        let command = args
+            .get("command")
+            .and_then(|v| v.as_str())
+            .ok_or(MCPError::MissingParameters)?;
 
-        self.run_command(&command, argv, progress_sender).await
-    }
+        let timeout_seconds = args.get("timeout").and_then(|v| v.as_u64()).unwrap_or(30);
 
-    async fn handle_list_directory(
-        &self,
-        args: &Value,
-        progress_sender: ProgressSender,
-    ) -> Result<ToolResponse, MCPError> {
-        let path = self.extract_optional_string(args, "path", ".");
-        let show_hidden = self.extract_optional_bool(args, "show_hidden", false);
-
-        self.list_directory(&path, show_hidden, progress_sender)
-            .await
-    }
-
-    async fn handle_read_file(
-        &self,
-        args: &Value,
-        progress_sender: ProgressSender,
-    ) -> Result<ToolResponse, MCPError> {
-        let path = self.extract_string_param(args, "path")?;
-        let lines = args.get("lines").and_then(Value::as_str);
-
-        self.read_file(&path, lines, progress_sender).await
-    }
-
-    async fn handle_get_system_info(
-        &self,
-        _args: &Value,
-        progress_sender: ProgressSender,
-    ) -> Result<ToolResponse, MCPError> {
-        self.get_system_info(progress_sender).await
-    }
-
-    async fn handle_long_running_task(
-        &self,
-        _args: &Value,
-        progress_sender: ProgressSender,
-    ) -> Result<ToolResponse, MCPError> {
-        self.long_running_task(progress_sender).await
-    }
-
-    async fn run_command(
-        &self,
-        command: &str,
-        args: Vec<String>,
-        progress_sender: ProgressSender,
-    ) -> Result<ToolResponse, MCPError> {
-        let _ = progress_sender
-            .send_progress("cmd", 0.0, Some("Starting command execution".into()))
-            .await;
-
-        let output = timeout(
-            MAX_COMMAND_TIMEOUT,
-            Command::new(command).args(&args).output(),
-        )
-        .await
-        .map_err(|_| MCPError::CommandTimeout)??;
-
-        let _ = progress_sender
-            .send_progress("cmd", 1.0, Some("Command completed".into()))
-            .await;
-
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let success = output.status.success();
-
-        if stdout.len() + stderr.len() > MAX_OUTPUT_SIZE {
-            return Err(MCPError::OutputTooLarge);
-        }
-
-        let text = format!(
-            "Command: {} {}\nSuccess: {}\n\nStdout:\n{}{}",
-            command,
-            args.join(" "),
-            success,
-            stdout,
-            if stderr.is_empty() {
-                String::new()
-            } else {
-                format!("\nStderr:\n{}", stderr)
-            }
-        );
-
-        Ok(ToolResponse::new(text, !success))
-    }
-
-    async fn list_directory(
-        &self,
-        path: &str,
-        show_hidden: bool,
-        progress_sender: ProgressSender,
-    ) -> Result<ToolResponse, MCPError> {
-        let flag = if show_hidden { "-la" } else { "-l" };
-        self.run_command(
-            "ls",
-            vec![flag.to_string(), path.to_string()],
-            progress_sender,
-        )
-        .await
-    }
-
-    async fn read_file(
-        &self,
-        path: &str,
-        lines: Option<&str>,
-        progress_sender: ProgressSender,
-    ) -> Result<ToolResponse, MCPError> {
-        let (cmd, args) = match lines {
-            Some(n) if n.parse::<u32>().is_ok() => (
-                "head",
-                vec!["-n".to_string(), n.to_string(), path.to_string()],
-            ),
-            Some(n) if n.starts_with('-') && n[1..].parse::<u32>().is_ok() => (
-                "tail",
-                vec!["-n".to_string(), n[1..].to_string(), path.to_string()],
-            ),
-            _ => ("cat", vec![path.to_string()]),
-        };
-        self.run_command(cmd, args, progress_sender).await
-    }
-
-    async fn get_system_info(
-        &self,
-        progress_sender: ProgressSender,
-    ) -> Result<ToolResponse, MCPError> {
-        let cmds = [
-            ("uname", vec!["-a"]),
-            ("whoami", vec![]),
-            ("pwd", vec![]),
-            ("uptime", vec![]),
-            ("date", vec![]),
-        ];
-
-        let mut lines = Vec::new();
-        let total_cmds = cmds.len();
-
-        for (i, (cmd, args)) in cmds.iter().enumerate() {
-            let progress = (i as f64) / (total_cmds as f64);
-            let _ = progress_sender
-                .send_progress("sysinfo", progress, Some(format!("Running {}", cmd)))
-                .await;
-
-            let args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
-            match timeout(
-                Duration::from_secs(5),
-                Command::new(cmd).args(&args).output(),
-            )
-            .await
-            {
-                Ok(Ok(output)) => {
-                    let stdout = String::from_utf8_lossy(&output.stdout);
-                    lines.push(format!("{}: {}", cmd, stdout.trim()));
-                }
-                _ => lines.push(format!("{}: <failed>", cmd)),
-            }
-        }
+        let working_dir = args.get("working_dir").and_then(|v| v.as_str());
 
         let _ = progress_sender
             .send_progress(
-                "sysinfo",
-                1.0,
-                Some("System info collection complete".into()),
+                "request",
+                0.1,
+                Some("Starting command execution".to_string()),
             )
             .await;
 
-        let text = format!("System Information:\n{}", lines.join("\n"));
-        Ok(ToolResponse::new(text, false))
-    }
+        let mut cmd = Command::new("bash");
+        cmd.arg("-c")
+            .arg(command)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
 
-    async fn long_running_task(
-        &self,
-        progress_sender: ProgressSender,
-    ) -> Result<ToolResponse, MCPError> {
-        eprintln!("[TASK] Starting long-running task with progress notifications...");
-
-        for i in 1..=10 {
-            tokio::time::sleep(Duration::from_millis(500)).await;
-            let progress = i as f64 / 10.0;
-            let _ = progress_sender
-                .send_progress(
-                    "longtask",
-                    progress,
-                    Some(format!("Processing step {} of 10", i)),
-                )
-                .await;
+        if let Some(dir) = working_dir {
+            cmd.current_dir(dir);
         }
 
-        Ok(ToolResponse::new(
-            "Long-running task completed successfully with progress notifications".into(),
-            false,
-        ))
+        let mut child = cmd.spawn().map_err(|e| MCPError::IoError(e))?;
+
+        let _ = progress_sender
+            .send_progress(
+                "request",
+                0.2,
+                Some("Command started, reading output".to_string()),
+            )
+            .await;
+
+        let stdout = child.stdout.take().unwrap();
+        let stderr = child.stderr.take().unwrap();
+
+        let stdout_reader = BufReader::new(stdout);
+        let stderr_reader = BufReader::new(stderr);
+
+        let mut stdout_lines = stdout_reader.lines();
+        let mut stderr_lines = stderr_reader.lines();
+
+        let mut stdout_output = Vec::new();
+        let mut stderr_output = Vec::new();
+
+        let timeout =
+            tokio::time::timeout(std::time::Duration::from_secs(timeout_seconds), async {
+                loop {
+                    tokio::select! {
+                        stdout_line = stdout_lines.next_line() => {
+                            match stdout_line {
+                                Ok(Some(line)) => stdout_output.push(line),
+                                Ok(None) => break,
+                                Err(e) => return Err(MCPError::IoError(e)),
+                            }
+                        }
+                        stderr_line = stderr_lines.next_line() => {
+                            match stderr_line {
+                                Ok(Some(line)) => stderr_output.push(line),
+                                Ok(None) => {},
+                                Err(e) => return Err(MCPError::IoError(e)),
+                            }
+                        }
+                    }
+                }
+
+                let _ = progress_sender
+                    .send_progress(
+                        "request",
+                        0.8,
+                        Some("Waiting for command completion".to_string()),
+                    )
+                    .await;
+
+                let exit_status = child.wait().await.map_err(|e| MCPError::IoError(e))?;
+
+                Ok((exit_status, stdout_output, stderr_output))
+            });
+
+        let (exit_status, stdout_output, stderr_output) = match timeout.await {
+            Ok(result) => result?,
+            Err(_) => {
+                let _ = child.kill().await;
+                return Ok(ToolResponse::new(
+                    format!("Command timed out after {} seconds", timeout_seconds),
+                    true,
+                ));
+            }
+        };
+
+        let _ = progress_sender
+            .send_progress("request", 1.0, Some("Command completed".to_string()))
+            .await;
+
+        let mut response_text = String::new();
+
+        response_text.push_str(&format!("Command: {}\n", command));
+        response_text.push_str(&format!(
+            "Exit code: {}\n\n",
+            exit_status.code().unwrap_or(-1)
+        ));
+
+        if !stdout_output.is_empty() {
+            response_text.push_str("STDOUT:\n");
+            response_text.push_str(&stdout_output.join("\n"));
+            response_text.push_str("\n\n");
+        }
+
+        if !stderr_output.is_empty() {
+            response_text.push_str("STDERR:\n");
+            response_text.push_str(&stderr_output.join("\n"));
+            response_text.push_str("\n");
+        }
+
+        let is_error = !exit_status.success();
+        Ok(ToolResponse::new(response_text, is_error))
     }
 }
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    eprintln!("🚀 Enhanced MCP Server v0.6.0 - Production Ready with Streaming Progress");
-
-    let handler = MyToolHandler;
-
-    // Define tools with comprehensive schemas
-    let tools = vec![
-        Tool {
-            name: "run_command".into(),
-            description: "Execute system commands with arguments and security token validation"
-                .into(),
-            input_schema: ToolInputSchema {
-                schema_type: "object".into(),
-                properties: {
-                    let mut props = std::collections::HashMap::new();
-                    props.insert("command".into(), ToolProperty::string("Command to execute"));
-                    props.insert(
-                        "args".into(),
-                        ToolProperty::array("Command arguments", "string"),
-                    );
-                    props.insert(
-                        "token".into(),
-                        ToolProperty::string("Security token for authentication"),
-                    );
-                    props
-                },
-                required: vec!["command".into(), "token".into()],
+async fn main() {
+    let bash_tool = Tool {
+        name: "bash".to_string(),
+        description: "Execute bash commands with support for complex operations like rg, sed, awk, grep, find, etc.".to_string(),
+        input_schema: ToolInputSchema {
+            schema_type: "object".to_string(),
+            properties: {
+                let mut props = HashMap::new();
+                props.insert(
+                    "command".to_string(),
+                    ToolProperty::string("The bash command to execute")
+                );
+                props.insert(
+                    "timeout".to_string(),
+                    ToolProperty {
+                        property_type: "number".to_string(),
+                        description: "Timeout in seconds (default: 30)".to_string(),
+                        items: None,
+                        default: Some(Value::Number(30.into())),
+                    }
+                );
+                props.insert(
+                    "working_dir".to_string(),
+                    ToolProperty {
+                        property_type: "string".to_string(),
+                        description: "Working directory for command execution (optional)".to_string(),
+                        items: None,
+                        default: None,
+                    }
+                );
+                props
             },
+            required: vec!["command".to_string()],
         },
-        Tool {
-            name: "list_directory".into(),
-            description: "List directory contents with optional hidden file visibility".into(),
-            input_schema: ToolInputSchema {
-                schema_type: "object".into(),
-                properties: {
-                    let mut props = std::collections::HashMap::new();
-                    props.insert(
-                        "path".into(),
-                        ToolProperty::string("Directory path to list"),
-                    );
-                    props.insert(
-                        "show_hidden".into(),
-                        ToolProperty::boolean("Show hidden files", false),
-                    );
-                    props
-                },
-                required: vec![],
-            },
-        },
-        Tool {
-            name: "read_file".into(),
-            description: "Read file contents with optional line limiting".into(),
-            input_schema: ToolInputSchema {
-                schema_type: "object".into(),
-                properties: {
-                    let mut props = std::collections::HashMap::new();
-                    props.insert("path".into(), ToolProperty::string("File path to read"));
-                    props.insert(
-                        "lines".into(),
-                        ToolProperty::string(
-                            "Number of lines (positive for head, negative for tail)",
-                        ),
-                    );
-                    props
-                },
-                required: vec!["path".into()],
-            },
-        },
-        Tool {
-            name: "get_system_info".into(),
-            description: "Gather comprehensive system information with real-time progress".into(),
-            input_schema: ToolInputSchema {
-                schema_type: "object".into(),
-                properties: std::collections::HashMap::new(),
-                required: vec![],
-            },
-        },
-        Tool {
-            name: "long_running_task".into(),
-            description: "Demonstrate long-running operations with detailed progress notifications"
-                .into(),
-            input_schema: ToolInputSchema {
-                schema_type: "object".into(),
-                properties: std::collections::HashMap::new(),
-                required: vec![],
-            },
-        },
-    ];
+    };
 
-    // Define prompts
-    let prompts = vec![
-        Prompt::new(
-            "system_analysis",
-            "Advanced system analysis and recommendations",
-        ),
-        Prompt::new(
-            "command_generator",
-            "Safe system command generation assistant",
-        ),
-    ];
+    let server = SystemMCPServer::<BashToolHandler>::builder()
+        .with_tools(vec![bash_tool])
+        .build(BashToolHandler);
 
-    // Define resources
-    let resources = vec![
-        Resource::new(
-            "file:///etc/os-release",
-            "Operating System Release Information",
-        ),
-        Resource::new("file:///proc/meminfo", "System Memory Information"),
-        Resource::new("internal://system-status", "Live System Status Dashboard"),
-    ];
+    eprintln!("Bash MCP Server starting...");
 
-    // Build server with full capabilities
-    let mut server = ServerBuilder::new()
-        .with_tools(tools)
-        .with_prompts(prompts)
-        .with_resources(resources)
-        .build(handler);
+    let mut stdin = tokio::io::stdin();
+    let mut stdout = tokio::io::stdout();
 
-    // Set up progress notification handling
-    let mut notification_rx = server.take_notification_receiver().unwrap();
+    loop {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
-    let notification_task = tokio::spawn(async move {
-        while let Some(notification) = notification_rx.recv().await {
-            match notification {
-                ServerNotification::Progress {
-                    request_id,
-                    progress,
-                    message,
-                } => {
-                    let notification_msg =
-                        ProgressNotificationMessage::new(request_id, progress, message);
-                    if let Ok(json) = serde_json::to_string(&notification_msg) {
-                        println!("{}", json);
-                        let _ = io::stdout().flush();
+        let mut reader = BufReader::new(&mut stdin);
+        let mut line = String::new();
+
+        match reader.read_line(&mut line).await {
+            Ok(0) => break,
+            Ok(_) => {
+                line = line.trim().to_string();
+                if line.is_empty() {
+                    continue;
+                }
+
+                match serde_json::from_str::<MCPRequest>(&line) {
+                    Ok(request) => {
+                        if let Some(response) = server.handle(request).await {
+                            let response_json = serde_json::to_string(&response).unwrap();
+                            stdout.write_all(response_json.as_bytes()).await.unwrap();
+                            stdout.write_all(b"\n").await.unwrap();
+                            stdout.flush().await.unwrap();
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("Failed to parse request: {}", e);
                     }
                 }
             }
-        }
-    });
-
-    // Main request processing loop
-    let stdin = io::stdin();
-    let mut stdout = io::stdout();
-
-    for line in stdin.lock().lines() {
-        let raw = match line {
-            Ok(raw) => raw,
-            Err(_) => continue,
-        };
-
-        if raw.len() > MAX_REQUEST_SIZE {
-            let resp = MCPResponse::too_large();
-            println!("{}", serde_json::to_string(&resp)?);
-            stdout.flush()?;
-            continue;
-        }
-
-        match serde_json::from_str::<MCPRequest>(&raw) {
-            Ok(req) => {
-                if let Some(resp) = server.handle(req).await {
-                    println!("{}", serde_json::to_string(&resp)?);
-                    stdout.flush()?;
-                }
-            }
-            Err(_) => {
-                let resp = MCPResponse::parse_error();
-                println!("{}", serde_json::to_string(&resp)?);
-                stdout.flush()?;
+            Err(e) => {
+                eprintln!("Failed to read line: {}", e);
+                break;
             }
         }
     }
-
-    let _ = notification_task.await;
-    Ok(())
 }
