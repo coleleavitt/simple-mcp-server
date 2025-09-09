@@ -130,9 +130,6 @@ impl<H: ToolHandler> SystemMCPServer<H> {
 
         let request_id = req.id.clone();
 
-        // FIX: Each match arm now uses an `async` block. This allows the `?` operator
-        // to work correctly within the block, as its return type is `Result`.
-        // The entire match expression is then awaited.
         let result: Result<Value, MCPError> = match req.method.as_str() {
             "initialize" => async {
                 self.handler.initialize(self.capabilities.clone()).await
