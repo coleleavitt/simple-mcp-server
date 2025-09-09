@@ -24,55 +24,43 @@ macro_rules! tool_dispatch {
 /// Helper macro for extracting required parameters from JSON args
 #[macro_export]
 macro_rules! extract_required {
-    // String
+    // String (handles both string and &str by converting to owned String)
     ($args:expr, $key:expr, String) => {
         $args.get($key)
             .and_then(|v| v.as_str().map(|s| s.to_owned()))
-            .ok_or($crate::MCPError::MissingParameters)?
-    };
-    // &str (returns String for convenience)
-    ($args:expr, $key:expr, &str) => {
-        $args.get($key)
-            .and_then(|v| v.as_str().map(|s| s.to_owned()))
-            .ok_or($crate::MCPError::MissingParameters)?
+            .ok_or_else(|| $crate::MCPError::MissingParameters(format!("Missing required parameter: '{}'", $key)))?
     };
     // i64
     ($args:expr, $key:expr, i64) => {
         $args.get($key)
             .and_then(|v| v.as_i64())
-            .ok_or($crate::MCPError::MissingParameters)?
+            .ok_or_else(|| $crate::MCPError::MissingParameters(format!("Missing required parameter: '{}'", $key)))?
     };
     // u64
     ($args:expr, $key:expr, u64) => {
         $args.get($key)
             .and_then(|v| v.as_u64())
-            .ok_or($crate::MCPError::MissingParameters)?
+            .ok_or_else(|| $crate::MCPError::MissingParameters(format!("Missing required parameter: '{}'", $key)))?
     };
     // f64
     ($args:expr, $key:expr, f64) => {
         $args.get($key)
             .and_then(|v| v.as_f64())
-            .ok_or($crate::MCPError::MissingParameters)?
+            .ok_or_else(|| $crate::MCPError::MissingParameters(format!("Missing required parameter: '{}'", $key)))?
     };
     // bool
     ($args:expr, $key:expr, bool) => {
         $args.get($key)
             .and_then(|v| v.as_bool())
-            .ok_or($crate::MCPError::MissingParameters)?
+            .ok_or_else(|| $crate::MCPError::MissingParameters(format!("Missing required parameter: '{}'", $key)))?
     };
 }
 
 /// Helper macro for extracting optional parameters with defaults
 #[macro_export]
 macro_rules! extract_optional {
-    // String
+    // String (handles both string and &str by converting to owned String)
     ($args:expr, $key:expr, String, $default:expr) => {
-        $args.get($key)
-            .and_then(|v| v.as_str().map(|s| s.to_owned()))
-            .unwrap_or($default)
-    };
-    // &str (returns String for convenience)
-    ($args:expr, $key:expr, &str, $default:expr) => {
         $args.get($key)
             .and_then(|v| v.as_str().map(|s| s.to_owned()))
             .unwrap_or($default)
